@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import os
+import httpx
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
@@ -11,13 +13,29 @@ import agent
 
 # Per-chat conversation history: {chat_id: [messages]}
 _histories: dict = {}
-MAX_HISTORY = 20  # max user+assistant turns to keep
+MAX_HISTORY = 20
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+_draft_counter = 0
+
+
+def _next_draft_id() -> int:
+    global _draft_counter
+    _draft_counter += 1
+    return _draft_counter
+
+
+async def _send_draft(token: str, chat_id: int, draft_id: int, text: str = "") -> None:
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"https://api.telegram.org/bot{token}/sendMessageDraft",
+            json={"chat_id": chat_id, "draft_id": draft_id, "text": text},
+        )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -42,32 +60,69 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user_input:
         return
 
-    # In group chats, only respond when the bot is mentioned
-    if update.message.chat.type in ("group", "supergroup"):
+    is_group = update.message.chat.type in ("group", "supergroup")
+
+    # In group chats, only respond when mentioned
+    if is_group:
         bot_username = context.bot.username
         if f"@{bot_username}" not in user_input:
             return
-        # Strip the mention before passing to the agent
         user_input = user_input.replace(f"@{bot_username}", "").strip()
         if not user_input:
             return
 
-    await update.message.chat.send_action(ChatAction.TYPING)
-
     chat_id = update.message.chat_id
     history = _histories.get(chat_id, [])
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
 
-    try:
-        answer, history = agent.ask(user_input, history)
-        _histories[chat_id] = history[-MAX_HISTORY * 2:]
-    except Exception as e:
-        logger.error("Agent error: %s", e, exc_info=True)
-        answer = "Sorry, something went wrong while processing your request. Please try again."
+    if is_group:
+        # Groups: use typing indicator + send full message
+        await update.message.chat.send_action(ChatAction.TYPING)
+        try:
+            answer, history = agent.ask(user_input, history)
+            _histories[chat_id] = history[-MAX_HISTORY * 2:]
+        except Exception as e:
+            logger.error("Agent error: %s", e, exc_info=True)
+            answer = "Sorry, something went wrong. Please try again."
 
-    # Telegram caps messages at 4096 chars — split if needed
-    if len(answer) <= 4096:
-        await update.message.reply_text(answer)
+        for i in range(0, len(answer), 4096):
+            await update.message.reply_text(answer[i:i + 4096])
+
     else:
+        # Private chats: stream response via sendMessageDraft
+        draft_id = _next_draft_id()
+        await _send_draft(token, chat_id, draft_id, "Thinking...")  # show placeholder
+
+        full_text = ""
+        last_sent_len = 0
+        new_history = history
+        error = None
+
+        try:
+            gen = agent.ask_stream(user_input, history)
+            while True:
+                try:
+                    chunk = next(gen)
+                    full_text += chunk
+                    # Update draft every 40 chars to avoid rate limits
+                    if len(full_text) - last_sent_len >= 40:
+                        await _send_draft(token, chat_id, draft_id, full_text)
+                        last_sent_len = len(full_text)
+                except StopIteration as e:
+                    new_history = e.value or history
+                    break
+        except Exception as e:
+            logger.error("Agent error: %s", e, exc_info=True)
+            error = "Sorry, something went wrong. Please try again."
+
+        if error:
+            await update.message.reply_text(error)
+            return
+
+        _histories[chat_id] = new_history[-MAX_HISTORY * 2:]
+        answer = full_text or "No response."
+
+        # Finalize — sendMessage persists the message, draft disappears
         for i in range(0, len(answer), 4096):
             await update.message.reply_text(answer[i:i + 4096])
 

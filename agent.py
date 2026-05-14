@@ -241,6 +241,51 @@ def _dispatch_tool(name: str, args: dict) -> str:
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 
+def ask_stream(user_message: str, history=None):
+    """Generator yielding text chunks. StopIteration.value contains updated history."""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+
+    while True:
+        response = get_openai().chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto",
+        )
+        msg = response.choices[0].message
+
+        if msg.tool_calls:
+            messages.append(msg)
+            for call in msg.tool_calls:
+                args = json.loads(call.function.arguments)
+                result = _dispatch_tool(call.function.name, args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": result,
+                })
+        else:
+            stream = get_openai().chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                stream=True,
+            )
+            full_reply = ""
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    full_reply += delta
+                    yield delta
+            new_history = (history or []) + [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": full_reply},
+            ]
+            return new_history
+
+
 def ask(user_message: str, history: list[dict] = None) -> tuple[str, list[dict]]:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     if history:
