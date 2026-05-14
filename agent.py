@@ -150,7 +150,9 @@ TOOLS = [
                 "Tables: client_details, company_details, company_sales. "
                 "Key columns — client_details: member_id, name, company_id, cam, email, phone, ic_no, start_date, expiry_date, pax. "
                 "company_details: company_id, company_name, brand, industry, nature_of_business, location, total_duration, made_in_spire, register_no, entiti_bisnes, partner_in_circle. "
-                "company_sales: company_id, year, month, type, amount."
+                "company_sales: company_id, year, month, type, amount. "
+                "IMPORTANT: company_sales.type has values: 'actual', 'target', 'min_target', 'total', 'ytd'. "
+                "Always filter WHERE type = 'actual' unless the user explicitly asks for targets or other types."
             ),
             "parameters": {
                 "type": "object",
@@ -167,13 +169,17 @@ SYSTEM_PROMPT = """You are a helpful assistant for Titan Database — a CRM cont
 
 Always use tools to fetch real data before answering. Never guess or fabricate records.
 
-Guidelines:
+Tool selection guidelines:
+- Use semantic_search for fuzzy or descriptive queries where you don't know the exact record — e.g. "find companies similar to vfive", "wellness companies near KL", "clients that look like high-value members".
+  - For "find similar to X" queries: first call get_company_details or search_clients to get X's attributes (industry, location, nature of business), then build a rich descriptive query from those attributes for semantic_search. Never search with just the name.
+- Use execute_sql for any structured, precise, or aggregation query — lists, counts, rankings, groupings, filters by date/value. Examples: "list all CAMs", "top 5 sales", "count clients per company".
+- Use the dedicated tools (search_clients, get_company_details, get_sales_summary, list_companies, get_expiring_memberships, get_top_companies_by_sales) as shortcuts when they directly match the query.
+
+Other rules:
 - Be concise but complete. Format responses clearly using bullet points or tables when listing multiple records.
-- For membership expiry queries, always call get_expiring_memberships.
-- For vague or descriptive queries, use semantic_search first, then follow up with specific tools if needed.
-- For any query the specific tools cannot handle — distinct lists, counts, groupings, custom aggregations, rankings — use execute_sql to write the exact SELECT query needed.
 - Dates are in YYYY-MM-DD format in the database.
 - Amounts in sales data are in MYR unless stated otherwise.
+- Sales data has multiple types: 'actual', 'target', 'min_target', 'total', 'ytd'. Always use type = 'actual' for real sales figures unless the user asks for targets.
 - If no results are found, say so clearly.
 """
 
