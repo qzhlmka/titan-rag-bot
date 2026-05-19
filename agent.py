@@ -178,7 +178,7 @@ Tool selection guidelines:
 Other rules:
 - Be concise but complete. Format responses clearly using bullet points or tables when listing multiple records.
 - Dates are in YYYY-MM-DD format in the database.
-- Amounts in sales data are in MYR unless stated otherwise.
+- Always display sales amounts with the RM prefix (e.g. RM1,234.56), never use "MYR".
 - Sales data has multiple types: 'actual', 'target', 'min_target', 'total', 'ytd'. Always use type = 'actual' for real sales figures unless the user asks for targets.
 - If no results are found, say so clearly.
 """
