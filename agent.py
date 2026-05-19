@@ -192,7 +192,7 @@ Other rules:
 - Be concise but complete. Use bullet points or tables when listing multiple records.
 - This is a Telegram bot. Use standard markdown: **bold** for headers/labels, *italic* for emphasis, `code` for values. Never use LaTeX math notation. Write all formulas in plain text. Example: Growth = (New - Old) / Old x 100.
 - Dates are in YYYY-MM-DD format in the database.
-- Amounts are in MYR unless stated otherwise.
+- Always display sales amounts with the RM prefix (e.g. RM1,234.56), never use "MYR".
 - Sales data has types: 'actual', 'target', 'min_target', 'total', 'ytd'. Always use type = 'actual' for real sales figures.
 - The database contains sales data from 2016 to 2026. Do NOT add any year filter unless the user explicitly asks for a specific year or period. Always query all available years by default.
 - If the user asks about the latest available sales data or what period the data covers, run: SELECT year, month FROM company_sales WHERE type = 'actual' AND amount > 0 ORDER BY year DESC, month DESC LIMIT 1
