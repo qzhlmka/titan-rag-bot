@@ -16,11 +16,29 @@ import agent
 
 def md_to_html(text: str) -> str:
     """Convert markdown formatting to Telegram HTML, safely escaping data."""
-    # Escape HTML entities in raw content first
+    # Strip LaTeX block delimiters \[...\] and \(...\)
+    text = re.sub(r'\\\[(.+?)\\\]', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\\\((.+?)\\\)', r'\1', text, flags=re.DOTALL)
+    # Strip $...$ and $$...$$ math delimiters
+    text = re.sub(r'\$\$(.+?)\$\$', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\$(.+?)\$', r'\1', text)
+    # Convert common LaTeX commands to plain text
+    text = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1 / \2)', text)
+    text = re.sub(r'\\times', 'x', text)
+    text = re.sub(r'\\div', '/', text)
+    text = re.sub(r'\\approx', '~=', text)
+    text = re.sub(r'\\cdot', 'x', text)
+    text = re.sub(r'\\left\(', '(', text)
+    text = re.sub(r'\\right\)', ')', text)
+    text = re.sub(r'\\left\[', '[', text)
+    text = re.sub(r'\\right\]', ']', text)
+    text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', text)  # any remaining \cmd{x} → x
+    text = re.sub(r'\\[a-zA-Z]+', '', text)                  # bare \cmd → remove
+    # Escape HTML entities in raw content
     text = escape(text)
     # **bold**
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
-    # *italic* (only single asterisks not already converted)
+    # *italic* (single asterisks not already converted)
     text = re.sub(r'\*([^*\n]+?)\*', r'<i>\1</i>', text)
     # `code`
     text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
