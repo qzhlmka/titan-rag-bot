@@ -170,7 +170,8 @@ Other rules:
 - Amounts are in MYR unless stated otherwise.
 - Sales data has types: 'actual', 'target', 'min_target', 'total', 'ytd'. Always use type = 'actual' for real sales figures.
 - The database contains sales data from 2016 to 2026. Do NOT add any year filter unless the user explicitly asks for a specific year or period. Always query all available years by default.
-- If no results are found, say so clearly."""
+- If no results are found, say so clearly.
+- Member ID prefixes indicate membership tier: IDs starting with "TCP" are Titan Circle Plus (TCP) members — the higher-value tier. IDs starting with "T" (but not TCP) are Titanium Circle / Titan members — the standard tier."""
 
 _agent_executor = None
 
