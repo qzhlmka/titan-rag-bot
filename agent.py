@@ -69,7 +69,8 @@ def get_sales_summary(
     year: Optional[int] = None,
     month: Optional[int] = None,
 ) -> str:
-    """Get actual sales data for a specific company, optionally filtered by year and/or month."""
+    """Get actual sales data for a specific company, optionally filtered by a single year and/or a single month.
+    Only use this for a specific month or full year — NOT for month ranges. For ranges (e.g. Jan–Jun 2025), use execute_sql instead."""
     results = db.get_sales_summary(company_name=company_name, year=year, month=month)
     return json.dumps(results, default=str)
 
@@ -194,6 +195,7 @@ Other rules:
 - Dates are in YYYY-MM-DD format in the database.
 - Always display sales amounts with the RM prefix (e.g. RM1,234.56), never use "MYR".
 - Sales data has types: 'actual', 'target', 'min_target', 'total', 'ytd'. Always use type = 'actual' for real sales figures.
+- For sales queries spanning a month range (e.g. "Jan to Jun 2025"), always use execute_sql with a BETWEEN or >= / <= filter on year and month — never call get_sales_summary multiple times.
 - The database contains sales data from 2016 to 2026. Do NOT add any year filter unless the user explicitly asks for a specific year or period. Always query all available years by default.
 - If the user asks about the latest available sales data or what period the data covers, run: SELECT year, month FROM company_sales WHERE type = 'actual' AND amount > 0 ORDER BY year DESC, month DESC LIMIT 1
 - If no results are found, say so clearly.
