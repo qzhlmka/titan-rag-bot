@@ -111,11 +111,36 @@ def execute_sql(query: str) -> str:
     """Run a read-only SELECT query against the database.
     Use for any query the other tools cannot handle — distinct lists, counts, aggregations, groupings, rankings, joins, etc.
 
-    Tables: client_details, company_details, company_sales.
-    Key columns:
-    - client_details: member_id, name, company_id, cam, email, phone, ic_no, start_date, expiry_date, pax
+    Tables and views:
+    - client_company_view: Pre-joined view of clients + their company info. USE THIS for any query involving both client and company data.
+      Columns: member_id, client_name, cam, email, phone, ic_no, start_date, expiry_date, pax, membership_tier,
+               company_id, company_name, brand, industry, nature_of_business, location, total_duration, partner_in_circle, made_in_spire, entiti_bisnes
+      membership_tier is already computed: 'Titan Circle Plus' (TCP prefix) or 'Titanium Circle' (T prefix).
+
     - company_details: company_id, company_name, brand, industry, nature_of_business, location, total_duration, made_in_spire, register_no, entiti_bisnes, partner_in_circle
+    - client_details: member_id, name, company_id, cam, email, phone, ic_no, start_date, expiry_date, pax
     - company_sales: company_id, year, month, type, amount
+      NOTE: company_sales has no company_name — join to company_details on company_id to get it.
+
+    When the user asks about "clients" achieving sales targets, they mean companies (sales are per company, not per person).
+
+    Example — companies with sales > 10M in 2026:
+    SELECT cd.company_name, SUM(cs.amount) AS total_sales
+    FROM company_details cd
+    JOIN company_sales cs ON cd.company_id = cs.company_id
+    WHERE cs.type = 'actual' AND cs.year = 2026
+    GROUP BY cd.company_id, cd.company_name
+    HAVING SUM(cs.amount) > 10000000
+    ORDER BY total_sales DESC
+
+    Example — clients from companies with sales > 10M:
+    SELECT ccv.client_name, ccv.company_name, ccv.membership_tier, SUM(cs.amount) AS total_sales
+    FROM client_company_view ccv
+    JOIN company_sales cs ON ccv.company_id = cs.company_id
+    WHERE cs.type = 'actual' AND cs.year = 2026
+    GROUP BY ccv.member_id, ccv.client_name, ccv.company_name, ccv.membership_tier
+    HAVING SUM(cs.amount) > 10000000
+    ORDER BY total_sales DESC
 
     IMPORTANT: company_sales.type has values: 'actual', 'target', 'min_target', 'total', 'ytd'.
     Always filter WHERE type = 'actual' unless the user explicitly asks for targets or other types."""
