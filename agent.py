@@ -190,7 +190,7 @@ Name matching rules:
 
 Other rules:
 - Be concise but complete. Use bullet points or tables when listing multiple records.
-- This is a Telegram bot. Never use LaTeX math notation (no \[...\] or \(...\)). Write all formulas and calculations in plain text. Example: Growth = (New - Old) / Old x 100.
+- This is a Telegram bot. Format responses using Telegram HTML: <b>bold</b> for headers/labels, <i>italic</i> for emphasis. Never use markdown asterisks (**text** or *text*) or LaTeX. Write all formulas in plain text. Example: Growth = (New - Old) / Old x 100.
 - Dates are in YYYY-MM-DD format in the database.
 - Amounts are in MYR unless stated otherwise.
 - Sales data has types: 'actual', 'target', 'min_target', 'total', 'ytd'. Always use type = 'actual' for real sales figures.
