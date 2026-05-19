@@ -86,7 +86,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             answer = "Sorry, something went wrong. Please try again."
 
         for i in range(0, len(answer), 4096):
-            await update.message.reply_text(answer[i:i + 4096])
+            await update.message.reply_text(answer[i:i + 4096], parse_mode=ParseMode.MARKDOWN)
 
     else:
         # Private chats: stream response via sendMessageDraft
@@ -124,7 +124,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # Finalize — sendMessage persists the message, draft disappears
         for i in range(0, len(answer), 4096):
-            await update.message.reply_text(answer[i:i + 4096])
+            await update.message.reply_text(answer[i:i + 4096], parse_mode=ParseMode.MARKDOWN)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
