@@ -95,7 +95,7 @@ async def updatedatabase(update: Update, _context: ContextTypes.DEFAULT_TYPE) ->
         return
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(webhook_url)
+            resp = await client.post(webhook_url, json={"chat_id": update.message.chat_id})
         if resp.status_code in (200, 202):
             await update.message.reply_text("Database update started. This usually takes around 7 minutes.")
         else:
