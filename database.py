@@ -1,17 +1,17 @@
 import os
+import threading
 from supabase import create_client, Client
 
-_client = None
+_local = threading.local()
 
 
 def get_client() -> Client:
-    global _client
-    if _client is None:
-        _client = create_client(
+    if not getattr(_local, "client", None):
+        _local.client = create_client(
             os.environ["SUPABASE_URL"],
             os.environ["SUPABASE_SERVICE_KEY"],
         )
-    return _client
+    return _local.client
 
 
 def semantic_search(query_embedding: list[float], limit: int = 5) -> list[dict]:

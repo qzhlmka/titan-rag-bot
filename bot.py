@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import os
+import re
 import httpx
+from html import escape
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
@@ -10,6 +12,37 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 load_dotenv()
 
 import agent
+
+
+def md_to_html(text: str) -> str:
+    """Convert markdown formatting to Telegram HTML, safely escaping data."""
+    # Strip LaTeX block delimiters \[...\] and \(...\)
+    text = re.sub(r'\\\[(.+?)\\\]', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\\\((.+?)\\\)', r'\1', text, flags=re.DOTALL)
+    # Strip $...$ and $$...$$ math delimiters
+    text = re.sub(r'\$\$(.+?)\$\$', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\$(.+?)\$', r'\1', text)
+    # Convert common LaTeX commands to plain text
+    text = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1 / \2)', text)
+    text = re.sub(r'\\times', 'x', text)
+    text = re.sub(r'\\div', '/', text)
+    text = re.sub(r'\\approx', '~=', text)
+    text = re.sub(r'\\cdot', 'x', text)
+    text = re.sub(r'\\left\(', '(', text)
+    text = re.sub(r'\\right\)', ')', text)
+    text = re.sub(r'\\left\[', '[', text)
+    text = re.sub(r'\\right\]', ']', text)
+    text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', text)  # any remaining \cmd{x} → x
+    text = re.sub(r'\\[a-zA-Z]+', '', text)                  # bare \cmd → remove
+    # Escape HTML entities in raw content
+    text = escape(text)
+    # **bold**
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    # *italic* (single asterisks not already converted)
+    text = re.sub(r'\*([^*\n]+?)\*', r'<i>\1</i>', text)
+    # `code`
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    return text
 
 # Per-chat conversation history: {chat_id: [messages]}
 _histories: dict = {}
@@ -85,8 +118,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.error("Agent error: %s", e, exc_info=True)
             answer = "Sorry, something went wrong. Please try again."
 
-        for i in range(0, len(answer), 4096):
-            await update.message.reply_text(answer[i:i + 4096], parse_mode=ParseMode.MARKDOWN)
+        formatted = md_to_html(answer)
+        for i in range(0, len(formatted), 4096):
+            await update.message.reply_text(formatted[i:i + 4096], parse_mode=ParseMode.HTML)
+        while agent._pending_files:
+            file_path = agent._pending_files.pop(0)
+            if os.path.exists(file_path):
+                with open(file_path, "rb") as f:
+                    await update.message.reply_document(f, filename=os.path.basename(file_path))
+                os.remove(file_path)
 
     else:
         # Private chats: stream response via sendMessageDraft
@@ -95,22 +135,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         full_text = ""
         last_sent_len = 0
-        new_history = history
         error = None
 
         try:
-            gen = agent.ask_stream(user_input, history)
-            while True:
-                try:
-                    chunk = next(gen)
-                    full_text += chunk
-                    # Update draft every 40 chars to avoid rate limits
-                    if len(full_text) - last_sent_len >= 40:
-                        await _send_draft(token, chat_id, draft_id, full_text)
-                        last_sent_len = len(full_text)
-                except StopIteration as e:
-                    new_history = e.value or history
-                    break
+            async for chunk in agent.ask_stream(user_input, history):
+                full_text += chunk
+                if len(full_text) - last_sent_len >= 40:
+                    await _send_draft(token, chat_id, draft_id, full_text)
+                    last_sent_len = len(full_text)
         except Exception as e:
             logger.error("Agent error: %s", e, exc_info=True)
             error = "Sorry, something went wrong. Please try again."
@@ -119,12 +151,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(error)
             return
 
+        new_history = (history or []) + [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": full_text},
+        ]
         _histories[chat_id] = new_history[-MAX_HISTORY * 2:]
         answer = full_text or "No response."
 
         # Finalize — sendMessage persists the message, draft disappears
-        for i in range(0, len(answer), 4096):
-            await update.message.reply_text(answer[i:i + 4096], parse_mode=ParseMode.MARKDOWN)
+        formatted = md_to_html(answer)
+        for i in range(0, len(formatted), 4096):
+            await update.message.reply_text(formatted[i:i + 4096], parse_mode=ParseMode.HTML)
+
+        # Send any files generated by tools
+        while agent._pending_files:
+            file_path = agent._pending_files.pop(0)
+            if os.path.exists(file_path):
+                with open(file_path, "rb") as f:
+                    await update.message.reply_document(f, filename=os.path.basename(file_path))
+                os.remove(file_path)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

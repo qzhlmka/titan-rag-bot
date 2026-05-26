@@ -1,168 +1,177 @@
 import json
 import os
+from typing import Optional
 from openai import OpenAI
+from langchain_openai import ChatOpenAI
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, AIMessage
 import database as db
+import slides as slide_gen
 
-_openai = None
+_openai_client = None
 
 
-def get_openai() -> OpenAI:
-    global _openai
-    if _openai is None:
-        _openai = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    return _openai
+def _get_openai() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return _openai_client
 
 
 def embed(text: str) -> list[float]:
-    resp = get_openai().embeddings.create(
-        model="text-embedding-3-small",
-        input=text,
-    )
+    resp = _get_openai().embeddings.create(model="text-embedding-3-small", input=text)
     return resp.data[0].embedding
 
 
+# ── Tools ─────────────────────────────────────────────────────────────────────
+
+@tool
+def semantic_search(query: str, limit: int = 5) -> str:
+    """Search client and company records using natural language.
+    Use for vague or descriptive queries like 'health companies in KL' or 'find someone named Ahmad'.
+    For 'find similar to X' queries: first call get_company_details to get X's attributes,
+    then build a rich descriptive query from industry/location/business type — never search with just the name."""
+    embedding = embed(query)
+    results = db.semantic_search(embedding, limit=limit)
+    return json.dumps(results, default=str)
+
+
+@tool
+def search_clients(
+    name: Optional[str] = None,
+    company_name: Optional[str] = None,
+    cam: Optional[str] = None,
+    expiry_before: Optional[str] = None,
+    expiry_after: Optional[str] = None,
+    limit: int = 50,
+) -> str:
+    """Search clients by name, company, CAM (account manager), or membership expiry date.
+    Use ISO date format YYYY-MM-DD for dates."""
+    results = db.search_clients(
+        name=name, company_name=company_name, cam=cam,
+        expiry_before=expiry_before, expiry_after=expiry_after, limit=limit,
+    )
+    return json.dumps(results, default=str)
+
+
+@tool
+def get_company_details(company_name: str) -> str:
+    """Get full details of a company by name, including industry, location, brand, and business type."""
+    results = db.get_company_details(company_name)
+    return json.dumps(results, default=str)
+
+
+@tool
+def get_sales_summary(
+    company_name: str,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+) -> str:
+    """Get actual sales data for a specific company, optionally filtered by a single year and/or a single month.
+    Only use this for a specific month or full year — NOT for month ranges. For ranges (e.g. Jan–Jun 2025), use execute_sql instead."""
+    results = db.get_sales_summary(company_name=company_name, year=year, month=month)
+    return json.dumps(results, default=str)
+
+
+@tool
+def list_companies(
+    industry: Optional[str] = None,
+    location: Optional[str] = None,
+    partner_in_circle: Optional[str] = None,
+    limit: int = 150,
+) -> str:
+    """List companies filtered by industry, location, or partner status."""
+    results = db.list_companies(industry=industry, location=location,
+                                partner_in_circle=partner_in_circle, limit=limit)
+    return json.dumps(results, default=str)
+
+
+@tool
+def get_top_companies_by_sales(
+    limit: int = 5,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+) -> str:
+    """Get companies ranked by total actual sales, highest first.
+    Use for queries like 'top companies by sales' or 'best performing companies'."""
+    results = db.get_top_companies_by_sales(limit=limit, year=year, month=month)
+    return json.dumps(results, default=str)
+
+
+@tool
+def get_expiring_memberships(within_days: int = 30) -> str:
+    """Get clients whose memberships are expiring within a number of days from today."""
+    results = db.get_expiring_memberships(within_days=within_days)
+    return json.dumps(results, default=str)
+
+
+@tool
+def execute_sql(query: str) -> str:
+    """Run a read-only SELECT query against the database.
+    Use for any query the other tools cannot handle — distinct lists, counts, aggregations, groupings, rankings, joins, etc.
+
+    Tables and views:
+    - client_company_view: Pre-joined view of clients + their company info. USE THIS for any query involving both client and company data.
+      Columns: member_id, client_name, cam, email, phone, ic_no, start_date, expiry_date, pax, membership_tier,
+               company_id, company_name, brand, industry, nature_of_business, location, total_duration, partner_in_circle, made_in_spire, entiti_bisnes
+      membership_tier is already computed: 'Titan Circle Plus' (TCP prefix) or 'Titanium Circle' (T prefix).
+
+    - company_details: company_id, company_name, brand, industry, nature_of_business, location, total_duration, made_in_spire, register_no, entiti_bisnes, partner_in_circle
+    - client_details: member_id, name, company_id, cam, email, phone, ic_no, start_date, expiry_date, pax
+    - company_sales: company_id, year, month, type, amount
+      NOTE: company_sales has no company_name — join to company_details on company_id to get it.
+
+    When the user asks about "clients" achieving sales targets, they mean companies (sales are per company, not per person).
+
+    Example — companies with sales > 10M in 2026:
+    SELECT cd.company_name, SUM(cs.amount) AS total_sales
+    FROM company_details cd
+    JOIN company_sales cs ON cd.company_id = cs.company_id
+    WHERE cs.type = 'actual' AND cs.year = 2026
+    GROUP BY cd.company_id, cd.company_name
+    HAVING SUM(cs.amount) > 10000000
+    ORDER BY total_sales DESC
+
+    Example — clients from companies with sales > 10M:
+    SELECT ccv.client_name, ccv.company_name, ccv.membership_tier, SUM(cs.amount) AS total_sales
+    FROM client_company_view ccv
+    JOIN company_sales cs ON ccv.company_id = cs.company_id
+    WHERE cs.type = 'actual' AND cs.year = 2026
+    GROUP BY ccv.member_id, ccv.client_name, ccv.company_name, ccv.membership_tier
+    HAVING SUM(cs.amount) > 10000000
+    ORDER BY total_sales DESC
+
+    IMPORTANT: company_sales.type has values: 'actual', 'target', 'min_target', 'total', 'ytd'.
+    Always filter WHERE type = 'actual' unless the user explicitly asks for targets or other types."""
+    results = db.execute_sql(query.rstrip("; \n"))
+    return json.dumps(results, default=str)
+
+
+# Pending files to be sent by bot.py after the agent responds
+_pending_files: list = []
+
+
+@tool
+def generate_sales_slides(company_name: str, year: Optional[int] = None) -> str:
+    """Generate a PowerPoint sales report for a company and send it to the user.
+    Use when the user asks to create slides, a presentation, or a report for a company's sales."""
+    path = slide_gen.create_sales_slides(company_name=company_name, year=year)
+    _pending_files.append(path)
+    return f"Sales presentation for {company_name} has been generated and will be sent to you now."
+
+
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "semantic_search",
-            "description": (
-                "Search client and company records using natural language. "
-                "Use this for vague or descriptive queries like 'health companies in KL' "
-                "or 'find someone named Ahmad'."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Natural language search query"},
-                    "limit": {"type": "integer", "description": "Max results to return (default 5)", "default": 5},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_clients",
-            "description": (
-                "Search clients by name, company, CAM (account manager), or membership expiry date. "
-                "Use ISO date format YYYY-MM-DD for dates."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Client name (partial match)"},
-                    "company_name": {"type": "string", "description": "Company name (partial match)"},
-                    "cam": {"type": "string", "description": "Client Account Manager name"},
-                    "expiry_before": {"type": "string", "description": "Filter memberships expiring before this date (YYYY-MM-DD)"},
-                    "expiry_after": {"type": "string", "description": "Filter memberships expiring after this date (YYYY-MM-DD)"},
-                    "limit": {"type": "integer", "description": "Max results (default 10)"},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_company_details",
-            "description": "Get full details of a company by name, including industry, location, brand, and business type.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "company_name": {"type": "string", "description": "Company name (partial match)"},
-                },
-                "required": ["company_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_sales_summary",
-            "description": "Get sales data for a company, optionally filtered by year and/or month.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "company_name": {"type": "string", "description": "Company name"},
-                    "year": {"type": "integer", "description": "Filter by year (e.g. 2024)"},
-                    "month": {"type": "integer", "description": "Filter by month (1-12)"},
-                },
-                "required": ["company_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_companies",
-            "description": "List companies filtered by industry, location, or partner status.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "industry": {"type": "string", "description": "Industry type (e.g. 'Health & Wellness', 'Fashion')"},
-                    "location": {"type": "string", "description": "Location or state"},
-                    "partner_in_circle": {"type": "string", "description": "Partner in circle status"},
-                    "limit": {"type": "integer", "description": "Max results (default 20)"},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_top_companies_by_sales",
-            "description": "Get companies ranked by total sales amount, highest first. Use for queries like 'top companies by sales', 'best performing companies', 'highest revenue companies'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "description": "Number of companies to return (default 5)"},
-                    "year": {"type": "integer", "description": "Filter by year (e.g. 2024)"},
-                    "month": {"type": "integer", "description": "Filter by month (1-12)"},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_expiring_memberships",
-            "description": "Get clients whose memberships are expiring within a number of days from today.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "within_days": {"type": "integer", "description": "Number of days from today (default 30)"},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "execute_sql",
-            "description": (
-                "Run a read-only SELECT query directly against the database. "
-                "Use this for any query the other tools cannot handle — distinct lists, counts, aggregations, groupings, rankings, joins, etc. "
-                "Tables: client_details, company_details, company_sales. "
-                "Key columns — client_details: member_id, name, company_id, cam, email, phone, ic_no, start_date, expiry_date, pax. "
-                "company_details: company_id, company_name, brand, industry, nature_of_business, location, total_duration, made_in_spire, register_no, entiti_bisnes, partner_in_circle. "
-                "company_sales: company_id, year, month, type, amount. "
-                "IMPORTANT: company_sales.type has values: 'actual', 'target', 'min_target', 'total', 'ytd'. "
-                "Always filter WHERE type = 'actual' unless the user explicitly asks for targets or other types."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "A valid PostgreSQL SELECT statement"},
-                },
-                "required": ["query"],
-            },
-        },
-    },
+    semantic_search,
+    search_clients,
+    get_company_details,
+    get_sales_summary,
+    list_companies,
+    get_top_companies_by_sales,
+    get_expiring_memberships,
+    execute_sql,
+    generate_sales_slides,
 ]
 
 SYSTEM_PROMPT = """You are a helpful assistant for Titan Database — a CRM containing client and company records.
@@ -170,151 +179,76 @@ SYSTEM_PROMPT = """You are a helpful assistant for Titan Database — a CRM cont
 Always use tools to fetch real data before answering. Never guess or fabricate records.
 
 Tool selection guidelines:
-- Use semantic_search for fuzzy or descriptive queries where you don't know the exact record — e.g. "find companies similar to vfive", "wellness companies near KL", "clients that look like high-value members".
-  - For "find similar to X" queries: first call get_company_details or search_clients to get X's attributes (industry, location, nature of business), then build a rich descriptive query from those attributes for semantic_search. Never search with just the name.
-- Use execute_sql for any structured, precise, or aggregation query — lists, counts, rankings, groupings, filters by date/value. Examples: "list all CAMs", "top 5 sales", "count clients per company".
-- Use the dedicated tools (search_clients, get_company_details, get_sales_summary, list_companies, get_expiring_memberships, get_top_companies_by_sales) as shortcuts when they directly match the query.
+- Use semantic_search for fuzzy or descriptive queries — e.g. "find companies similar to vfive", "wellness companies near KL".
+  For "find similar to X": first call get_company_details to get X's attributes, then build a descriptive query from those for semantic_search.
+- Use execute_sql for structured/precise queries — lists, counts, rankings, groupings. e.g. "list all CAMs", "top 5 sales", "count clients per company".
+- Use dedicated tools (search_clients, get_company_details, etc.) when they directly match the query.
+
+Name matching rules:
+- Users often use nicknames, short names, or partial names (e.g. "dr sam" instead of "Dr Samhan Clinic", "iyziq" instead of "Iyziq Sdn Bhd"). Always attempt partial matching — all database tools support partial name search.
+- If a lookup returns no results, do NOT give up. Try semantic_search with the name or description to find the closest match, then retry the original query using the correct full name.
+- Be flexible and infer what the user means — "vfive's clients" means search clients by company_name="vfive"; "sales for iyziq" means get_sales_summary with company_name="iyziq".
 
 Other rules:
-- Be concise but complete. Format responses clearly using bullet points or tables when listing multiple records.
+- Be concise but complete. Use bullet points or tables when listing multiple records.
+- This is a Telegram bot. Use standard markdown: **bold** for headers/labels, *italic* for emphasis, `code` for values. Never use LaTeX math notation. Write all formulas in plain text. Example: Growth = (New - Old) / Old x 100.
 - Dates are in YYYY-MM-DD format in the database.
 - Always display sales amounts with the RM prefix (e.g. RM1,234.56), never use "MYR".
-- Sales data has multiple types: 'actual', 'target', 'min_target', 'total', 'ytd'. Always use type = 'actual' for real sales figures unless the user asks for targets.
+- Sales data has types: 'actual', 'target', 'min_target', 'total', 'ytd'. Always use type = 'actual' for real sales figures.
+- For sales queries spanning a month range (e.g. "Jan to Jun 2025"), always use execute_sql with a BETWEEN or >= / <= filter on year and month — never call get_sales_summary multiple times.
+- The database contains sales data from 2016 to 2026. Do NOT add any year filter unless the user explicitly asks for a specific year or period. Always query all available years by default.
+- If the user asks about the latest available sales data or what period the data covers, run: SELECT year, month FROM company_sales WHERE type = 'actual' AND amount > 0 ORDER BY year DESC, month DESC LIMIT 1
 - If no results are found, say so clearly.
-"""
+- Member ID prefixes indicate membership tier: IDs starting with "TCP" are Titan Circle Plus (TCP) members — the higher-value tier. IDs starting with "T" (but not TCP) are Titanium Circle / Titan members — the standard tier."""
+
+_agent_executor = None
 
 
-def _dispatch_tool(name: str, args: dict) -> str:
-    if name == "semantic_search":
-        embedding = embed(args["query"])
-        results = db.semantic_search(embedding, limit=args.get("limit", 5))
-        return json.dumps(results, default=str)
-
-    if name == "search_clients":
-        results = db.search_clients(
-            name=args.get("name"),
-            company_name=args.get("company_name"),
-            cam=args.get("cam"),
-            expiry_before=args.get("expiry_before"),
-            expiry_after=args.get("expiry_after"),
-            limit=args.get("limit", 10),
-        )
-        return json.dumps(results, default=str)
-
-    if name == "get_company_details":
-        results = db.get_company_details(args["company_name"])
-        return json.dumps(results, default=str)
-
-    if name == "get_sales_summary":
-        results = db.get_sales_summary(
-            company_name=args["company_name"],
-            year=args.get("year"),
-            month=args.get("month"),
-        )
-        return json.dumps(results, default=str)
-
-    if name == "list_companies":
-        results = db.list_companies(
-            industry=args.get("industry"),
-            location=args.get("location"),
-            partner_in_circle=args.get("partner_in_circle"),
-            limit=args.get("limit", 20),
-        )
-        return json.dumps(results, default=str)
-
-    if name == "get_top_companies_by_sales":
-        results = db.get_top_companies_by_sales(
-            limit=args.get("limit", 5),
-            year=args.get("year"),
-            month=args.get("month"),
-        )
-        return json.dumps(results, default=str)
-
-    if name == "get_expiring_memberships":
-        results = db.get_expiring_memberships(within_days=args.get("within_days", 30))
-        return json.dumps(results, default=str)
-
-    if name == "execute_sql":
-        results = db.execute_sql(args["query"])
-        return json.dumps(results, default=str)
-
-    return json.dumps({"error": f"Unknown tool: {name}"})
+def _get_executor() -> AgentExecutor:
+    global _agent_executor
+    if _agent_executor is None:
+        llm = ChatOpenAI(model="gpt-4o", temperature=0, streaming=True)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", SYSTEM_PROMPT),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+            MessagesPlaceholder("agent_scratchpad"),
+        ])
+        agent = create_openai_tools_agent(llm, TOOLS, prompt)
+        _agent_executor = AgentExecutor(agent=agent, tools=TOOLS, verbose=False)
+    return _agent_executor
 
 
-def ask_stream(user_message: str, history=None):
-    """Generator yielding text chunks. StopIteration.value contains updated history."""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if history:
-        messages.extend(history)
-    messages.append({"role": "user", "content": user_message})
-
-    while True:
-        response = get_openai().chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-        )
-        msg = response.choices[0].message
-
-        if msg.tool_calls:
-            messages.append(msg)
-            for call in msg.tool_calls:
-                args = json.loads(call.function.arguments)
-                result = _dispatch_tool(call.function.name, args)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": result,
-                })
-        else:
-            stream = get_openai().chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                stream=True,
-            )
-            full_reply = ""
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content or ""
-                if delta:
-                    full_reply += delta
-                    yield delta
-            new_history = (history or []) + [
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": full_reply},
-            ]
-            return new_history
+def _to_lc_history(history) -> list:
+    msgs = []
+    for msg in (history or []):
+        if msg["role"] == "user":
+            msgs.append(HumanMessage(content=msg["content"]))
+        elif msg["role"] == "assistant":
+            msgs.append(AIMessage(content=msg["content"]))
+    return msgs
 
 
-def ask(user_message: str, history: list[dict] = None) -> tuple[str, list[dict]]:
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if history:
-        messages.extend(history)
-    messages.append({"role": "user", "content": user_message})
+def ask(user_message: str, history=None) -> tuple:
+    result = _get_executor().invoke({
+        "input": user_message,
+        "chat_history": _to_lc_history(history),
+    })
+    reply = result["output"]
+    new_history = (history or []) + [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": reply},
+    ]
+    return reply, new_history
 
-    while True:
-        response = get_openai().chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-        )
-        msg = response.choices[0].message
 
-        if msg.tool_calls:
-            messages.append(msg)
-            for call in msg.tool_calls:
-                args = json.loads(call.function.arguments)
-                result = _dispatch_tool(call.function.name, args)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": result,
-                })
-        else:
-            reply = msg.content or "No response."
-            new_history = (history or []) + [
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": reply},
-            ]
-            return reply, new_history
+async def ask_stream(user_message: str, history=None):
+    """Async generator yielding text chunks of the final response."""
+    async for event in _get_executor().astream_events(
+        {"input": user_message, "chat_history": _to_lc_history(history)},
+        version="v2",
+    ):
+        if event["event"] == "on_chat_model_stream":
+            chunk = event["data"]["chunk"]
+            if chunk.content and not getattr(chunk, "tool_call_chunks", None):
+                yield chunk.content
