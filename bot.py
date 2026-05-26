@@ -88,6 +88,22 @@ async def clear(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Conversation cleared.")
 
 
+async def updatedatabase(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    webhook_url = os.environ.get("N8N_WEBHOOK_URL")
+    if not webhook_url:
+        await update.message.reply_text("Database update is not configured.")
+        return
+    await update.message.reply_text("Triggering database update...")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(webhook_url)
+            resp.raise_for_status()
+        await update.message.reply_text("Database update triggered successfully.")
+    except Exception as e:
+        logger.error("n8n webhook error: %s", e, exc_info=True)
+        await update.message.reply_text("Failed to trigger database update. Please try again.")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_input = update.message.text.strip()
     if not user_input:
@@ -182,6 +198,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CommandHandler("updatedatabase", updatedatabase))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
