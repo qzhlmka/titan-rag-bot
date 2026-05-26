@@ -93,15 +93,20 @@ async def updatedatabase(update: Update, _context: ContextTypes.DEFAULT_TYPE) ->
     if not webhook_url:
         await update.message.reply_text("Database update is not configured.")
         return
-    await update.message.reply_text("Triggering database update...")
+    await update.message.reply_text("Database update in progress, please wait...")
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=600) as client:
             resp = await client.post(webhook_url)
-            resp.raise_for_status()
-        await update.message.reply_text("Database update triggered successfully.")
+        if resp.status_code == 200:
+            await update.message.reply_text("Database updated successfully.")
+        else:
+            logger.error("n8n returned status %s: %s", resp.status_code, resp.text)
+            await update.message.reply_text(f"Database update failed (status {resp.status_code}). Please check n8n.")
+    except httpx.TimeoutException:
+        await update.message.reply_text("Database update timed out. Please check n8n.")
     except Exception as e:
         logger.error("n8n webhook error: %s", e, exc_info=True)
-        await update.message.reply_text("Failed to trigger database update. Please try again.")
+        await update.message.reply_text("Failed to reach n8n. Please try again.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
