@@ -126,15 +126,18 @@ def list_companies(
     return result.data or []
 
 
-def execute_sql(query: str) -> list[dict]:
-    result = get_client().rpc("execute_readonly_sql", {"query": query.rstrip("; \n")}).execute()
-    data = result.data
-    if isinstance(data, list):
-        return data
-    if isinstance(data, str):
-        import json
-        return json.loads(data)
-    return data or []
+def execute_sql(query: str) -> list[dict] | str:
+    try:
+        result = get_client().rpc("execute_readonly_sql", {"query": query.rstrip("; \n")}).execute()
+        data = result.data
+        if isinstance(data, list):
+            return data
+        if isinstance(data, str):
+            import json
+            return json.loads(data)
+        return data or []
+    except Exception as e:
+        return f"SQL error: {e}"
 
 
 def get_top_companies_by_sales(
