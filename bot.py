@@ -114,7 +114,7 @@ async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Generating Top 100 Sales slides, please wait...")
     try:
         async with httpx.AsyncClient(timeout=600) as client:
-            resp = await client.post(script_url)
+            resp = await client.post(script_url, follow_redirects=True)
             resp.raise_for_status()
             data = resp.json()
             pdf_url = data.get("url")
