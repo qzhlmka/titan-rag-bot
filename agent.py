@@ -123,6 +123,12 @@ def execute_sql(query: str) -> str:
     - company_sales: company_id, year, month, type, amount
       NOTE: company_sales has no company_name — join to company_details on company_id to get it.
 
+    Ex-clients/companies (those who have left):
+    - ex_client_company_view: same as client_company_view but for ex-clients, plus moved_at (date they left). USE THIS for ex-client queries.
+    - ex_client_details: member_id, name, company_id, cam, email, phone, ic_no, start_date, expiry_date, pax, moved_at
+    - ex_company_details: company_id, company_name, brand, industry, nature_of_business, location, total_duration, made_in_spire, entiti_bisnes, partner_in_circle, moved_at
+    - ex_company_sales: company_id, year, month, type, amount, moved_at
+
     When the user asks about "clients" achieving sales targets, they mean companies (sales are per company, not per person).
 
     Example — companies with sales > 10M in 2026:
