@@ -106,6 +106,35 @@ async def updatedatabase(update: Update, _context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("Failed to reach n8n. Please try again.")
 
 
+async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    script_url = os.environ.get("TOP100_SLIDES_URL")
+    if not script_url:
+        await update.message.reply_text("Top 100 slides is not configured.")
+        return
+    await update.message.reply_text("Generating Top 100 Sales slides, please wait...")
+    try:
+        async with httpx.AsyncClient(timeout=600) as client:
+            resp = await client.post(script_url)
+            resp.raise_for_status()
+            data = resp.json()
+            pdf_url = data.get("url")
+            if not pdf_url:
+                await update.message.reply_text("Slides generated but no file URL returned.")
+                return
+            pdf_resp = await client.get(pdf_url, follow_redirects=True)
+            pdf_resp.raise_for_status()
+        await update.message.reply_document(
+            document=pdf_resp.content,
+            filename="Top100_Sales.pdf",
+            caption="Top 100 Sales Slides"
+        )
+    except httpx.TimeoutException:
+        await update.message.reply_text("Timed out generating slides. Please try again.")
+    except Exception as e:
+        logger.error("topsales error: %s", e, exc_info=True)
+        await update.message.reply_text("Failed to generate slides. Please try again.")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_input = update.message.text.strip()
     if not user_input:
@@ -201,6 +230,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("updatedatabase", updatedatabase))
+    app.add_handler(CommandHandler("topsales", topsales))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
