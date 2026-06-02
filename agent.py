@@ -143,6 +143,13 @@ def execute_sql(query: str) -> str:
     HAVING SUM(cs.amount) > 10000000
     ORDER BY total_sales DESC
 
+    Example — count clients by membership tier:
+    SELECT membership_tier, COUNT(*) AS tier_count
+    FROM client_company_view
+    GROUP BY membership_tier
+    ORDER BY tier_count DESC
+
+    IMPORTANT: Never reference computed aliases (like tier_count, total_sales) as column names — only use real columns from the schema above. Always compute aggregations with COUNT(*), SUM(), etc.
     IMPORTANT: company_sales.type has values: 'actual', 'target', 'min_target', 'total', 'ytd'.
     Always filter WHERE type = 'actual' unless the user explicitly asks for targets or other types."""
     results = db.execute_sql(query.rstrip("; \n"))
