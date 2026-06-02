@@ -117,6 +117,10 @@ async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
             resp = await client.post(script_url, follow_redirects=True)
             resp.raise_for_status()
             data = resp.json()
+            if data.get("error"):
+                logger.error("Apps Script error: %s", data["error"])
+                await update.message.reply_text(f"Script error: {data['error']}")
+                return
             pdf_url = data.get("url")
             if not pdf_url:
                 await update.message.reply_text("Slides generated but no file URL returned.")
