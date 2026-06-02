@@ -155,7 +155,14 @@ def execute_sql(query: str) -> str:
     GROUP BY membership_tier
     ORDER BY tier_count DESC
 
+    Example — clients who left today:
+    SELECT client_name, company_name, membership_tier, moved_at
+    FROM ex_client_company_view
+    WHERE moved_at::date = CURRENT_DATE
+    ORDER BY moved_at DESC
+
     IMPORTANT: Never reference computed aliases (like tier_count, total_sales) as column names — only use real columns from the schema above. Always compute aggregations with COUNT(*), SUM(), etc.
+    IMPORTANT: Never add LIMIT unless the user explicitly asks for a specific number of results. Always return all matching rows.
     IMPORTANT: company_sales.type has values: 'actual', 'target', 'min_target', 'total', 'ytd'.
     Always filter WHERE type = 'actual' unless the user explicitly asks for targets or other types."""
     results = db.execute_sql(query.rstrip("; \n"))
