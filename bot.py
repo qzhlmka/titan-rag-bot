@@ -111,32 +111,23 @@ async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     if not script_url:
         await update.message.reply_text("Top 100 slides is not configured.")
         return
-    await update.message.reply_text("Generating Top 100 Sales slides, please wait...")
+    await update.message.reply_text("Generating Top 100 Sales slides, please wait. The slides will be sent here when ready...")
     try:
-        async with httpx.AsyncClient(timeout=600) as client:
-            resp = await client.post(script_url, follow_redirects=True)
-            resp.raise_for_status()
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                script_url,
+                json={"chat_id": update.message.chat_id},
+                follow_redirects=True
+            )
             data = resp.json()
             if data.get("error"):
                 logger.error("Apps Script error: %s", data["error"])
                 await update.message.reply_text(f"Script error: {data['error']}")
-                return
-            pdf_url = data.get("url")
-            if not pdf_url:
-                await update.message.reply_text("Slides generated but no file URL returned.")
-                return
-            pdf_resp = await client.get(pdf_url, follow_redirects=True)
-            pdf_resp.raise_for_status()
-        await update.message.reply_document(
-            document=pdf_resp.content,
-            filename="Top100_Sales.pdf",
-            caption="Top 100 Sales Slides"
-        )
     except httpx.TimeoutException:
-        await update.message.reply_text("Timed out generating slides. Please try again.")
+        pass  # Script is still running, it will send the file directly when done
     except Exception as e:
         logger.error("topsales error: %s", e, exc_info=True)
-        await update.message.reply_text("Failed to generate slides. Please try again.")
+        await update.message.reply_text("Failed to reach the script. Please try again.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
