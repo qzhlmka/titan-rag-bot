@@ -36,6 +36,8 @@ def md_to_html(text: str) -> str:
     text = re.sub(r'\\[a-zA-Z]+', '', text)                  # bare \cmd → remove
     # Escape HTML entities in raw content
     text = escape(text)
+    # ### headings and ## headings → bold
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
     # **bold**
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
     # *italic* (single asterisks not already converted)
