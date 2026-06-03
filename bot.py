@@ -114,17 +114,11 @@ async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Generating Top 100 Sales slides, please wait. The slides will be sent here when ready...")
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            # Include chat_id in the original request so it's encoded in the redirect token
             resp = await client.get(
                 script_url,
                 params={"chat_id": update.message.chat_id},
-                follow_redirects=False
+                follow_redirects=True
             )
-            if resp.status_code in (301, 302, 303, 307, 308):
-                redirect_url = resp.headers.get('location', script_url)
-                resp = await client.get(redirect_url, follow_redirects=True)
-            else:
-                pass  # No redirect, response is direct
             data = resp.json()
             if data.get("error"):
                 logger.error("Apps Script error: %s", data["error"])
