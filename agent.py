@@ -1,5 +1,6 @@
 import json
 import os
+import requests
 from typing import Optional
 from openai import OpenAI
 from langchain_openai import ChatOpenAI
@@ -169,6 +170,57 @@ def execute_sql(query: str) -> str:
     return json.dumps(results, default=str)
 
 
+@tool
+def update_client_sales(
+    year: int,
+    month: int,
+    amount: float,
+    name: Optional[str] = None,
+    member_id: Optional[str] = None,
+) -> str:
+    """Update a client's sales record in the CRM system.
+    Use when the user wants to update, add, or record sales for a specific client.
+    Always look up the client in the database first to get both member_id and full name.
+    month should be a number (1-12)."""
+    webhook_url = os.environ.get("CRM_WEBHOOK_URL")
+    if not webhook_url:
+        return "CRM webhook is not configured."
+
+    if not member_id and not name:
+        return "Please provide either a member ID or client name."
+
+    # Always look up client to get full member_id and name from database
+    if name and not member_id:
+        results = db.search_clients(name=name, limit=1)
+        if not results:
+            return f"No client found with name '{name}'. Please check the name and try again."
+        member_id = results[0].get("member_id")
+        name = results[0].get("name")
+    elif member_id and not name:
+        results = db.search_clients(name=None, limit=1)
+        # Try to get name from member_id via SQL
+        rows = db.execute_sql(f"SELECT name FROM client_details WHERE member_id = '{member_id}' LIMIT 1")
+        if rows and isinstance(rows, list):
+            name = rows[0].get("name", name)
+
+    payload = {
+        "member_id": member_id,
+        "name": name,
+        "year": year,
+        "month": month,
+        "amount": amount,
+    }
+
+    try:
+        resp = requests.post(webhook_url, json=payload, timeout=30)
+        if resp.status_code in (200, 201, 202):
+            return f"Sales updated successfully for {name} ({member_id}) — {month}/{year}: RM {amount:,.2f}"
+        else:
+            return f"CRM returned error {resp.status_code}: {resp.text}"
+    except Exception as e:
+        return f"Failed to reach CRM: {str(e)}"
+
+
 # Pending files to be sent by bot.py after the agent responds
 _pending_files: list = []
 
@@ -192,6 +244,7 @@ TOOLS = [
     get_expiring_memberships,
     execute_sql,
     generate_sales_slides,
+    update_client_sales,
 ]
 
 SYSTEM_PROMPT = """You are a helpful assistant for Titan Database — a CRM containing client and company records.
