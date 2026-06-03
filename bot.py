@@ -32,7 +32,9 @@ def is_allowed(chat_id: int) -> bool:
             logger_tmp = logging.getLogger(__name__)
             logger_tmp.error("Failed to fetch allowed_chats: %s", e)
             return True  # fail open if Supabase unreachable
-    return not _allowed_cache or chat_id in _allowed_cache
+    result = not _allowed_cache or chat_id in _allowed_cache
+    logging.getLogger(__name__).info("is_allowed: chat_id=%s cache=%s result=%s", chat_id, _allowed_cache, result)
+    return result
 
 
 def md_to_html(text: str) -> str:
