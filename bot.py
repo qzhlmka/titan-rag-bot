@@ -114,9 +114,9 @@ async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Generating Top 100 Sales slides, please wait. The slides will be sent here when ready...")
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
+            resp = await client.get(
                 script_url,
-                json={"chat_id": update.message.chat_id},
+                params={"chat_id": update.message.chat_id},
                 follow_redirects=True
             )
             data = resp.json()
