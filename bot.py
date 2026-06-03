@@ -26,7 +26,7 @@ def is_allowed(chat_id: int) -> bool:
     if time.time() - _cache_time > _CACHE_TTL:
         try:
             rows = db.get_client().from_("allowed_chats").select("chat_id").execute().data or []
-            _allowed_cache = {row["chat_id"] for row in rows}
+            _allowed_cache = {int(row["chat_id"]) for row in rows}
             _cache_time = time.time()
         except Exception as e:
             logger_tmp = logging.getLogger(__name__)
