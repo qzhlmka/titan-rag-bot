@@ -160,6 +160,7 @@ async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update.message.chat_id):
+        await update.message.reply_text("You do not have access to this bot. Please contact the administrator.")
         return
     user_input = update.message.text.strip()
     if not user_input:
