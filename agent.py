@@ -1,6 +1,6 @@
 import json
 import os
-import requests
+import httpx
 from typing import Optional
 from openai import OpenAI
 from langchain_openai import ChatOpenAI
@@ -212,7 +212,7 @@ def update_client_sales(
     }
 
     try:
-        resp = requests.post(webhook_url, json=payload, timeout=30)
+        resp = httpx.post(webhook_url, json=payload, timeout=30)
         if resp.status_code in (200, 201, 202):
             return f"Sales updated successfully for {name} ({member_id}) — {month}/{year}: RM {amount:,.2f}"
         else:
