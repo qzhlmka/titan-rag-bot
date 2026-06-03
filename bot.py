@@ -12,27 +12,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 load_dotenv()
 
 import agent
-import database as db
-
-# Allowlist cache: {chat_id: bool}, refreshed every 5 minutes
-_allowed_cache: dict = {}
-_cache_time: float = 0
-_CACHE_TTL = 300  # seconds
-
-
-def is_allowed(chat_id: int) -> bool:
-    global _allowed_cache, _cache_time
-    import time
-    if time.time() - _cache_time > _CACHE_TTL:
-        try:
-            rows = db.get_client().from_("allowed_chats").select("chat_id").execute().data or []
-            _allowed_cache = {row["chat_id"] for row in rows}
-            _cache_time = time.time()
-        except Exception as e:
-            logger_tmp = logging.getLogger(__name__)
-            logger_tmp.error("Failed to fetch allowed_chats: %s", e)
-            return True  # fail open if Supabase unreachable
-    return not _allowed_cache or chat_id in _allowed_cache
 
 
 def md_to_html(text: str) -> str:
@@ -112,8 +91,6 @@ async def clear(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def updatedatabase(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_allowed(update.message.chat_id):
-        return
     webhook_url = os.environ.get("N8N_WEBHOOK_URL")
     if not webhook_url:
         await update.message.reply_text("Database update is not configured.")
@@ -132,8 +109,6 @@ async def updatedatabase(update: Update, _context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_allowed(update.message.chat_id):
-        return
     script_url = os.environ.get("TOP100_SLIDES_URL")
     if not script_url:
         await update.message.reply_text("Top 100 slides is not configured.")
@@ -157,8 +132,6 @@ async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_allowed(update.message.chat_id):
-        return
     user_input = update.message.text.strip()
     if not user_input:
         return
