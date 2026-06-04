@@ -203,12 +203,30 @@ def update_client_sales(
         if rows and isinstance(rows, list):
             name = rows[0].get("name", name)
 
+    # Fetch full year's sales for the client's company
+    sales = []
+    company_rows = db.execute_sql(
+        f"SELECT cd.company_id FROM client_details cl "
+        f"JOIN company_details cd ON cl.company_id = cd.company_id "
+        f"WHERE cl.member_id = '{member_id}' LIMIT 1"
+    )
+    if company_rows and isinstance(company_rows, list):
+        company_id = company_rows[0].get("company_id")
+        sales_rows = db.execute_sql(
+            f"SELECT month, amount FROM company_sales "
+            f"WHERE company_id = '{company_id}' AND year = {year} AND type = 'actual' "
+            f"ORDER BY month"
+        )
+        if sales_rows and isinstance(sales_rows, list):
+            sales = [{"month": r["month"], "amount": float(r["amount"] or 0)} for r in sales_rows]
+
     payload = {
         "member_id": member_id,
         "name": name,
         "year": year,
         "month": month,
         "amount": amount,
+        "sales": sales,
     }
 
     try:
