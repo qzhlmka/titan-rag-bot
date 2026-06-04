@@ -189,36 +189,31 @@ def update_client_sales(
     if not member_id and not name:
         return "Please provide either a member ID or client name."
 
-    # Always look up client to get full member_id and name from database
+    # Look up client by name or member_id
     if name and not member_id:
         results = db.search_clients(name=name, limit=1)
         if not results:
             return f"No client found with name '{name}'. Please check the name and try again."
         member_id = results[0].get("member_id")
         name = results[0].get("name")
-    elif member_id and not name:
-        results = db.search_clients(name=None, limit=1)
-        # Try to get name from member_id via SQL
-        rows = db.execute_sql(f"SELECT name FROM client_details WHERE member_id = '{member_id}' LIMIT 1")
+    elif member_id:
+        rows = db.execute_sql(
+            f"SELECT member_id, name FROM client_details WHERE member_id ILIKE '%{member_id}%' LIMIT 1"
+        )
         if rows and isinstance(rows, list):
+            member_id = rows[0].get("member_id", member_id)
             name = rows[0].get("name", name)
 
     # Fetch full year's sales for the client's company
     sales = []
     company_rows = db.execute_sql(
-        f"SELECT cd.company_id FROM client_details cl "
-        f"JOIN company_details cd ON cl.company_id = cd.company_id "
-        f"WHERE cl.member_id = '{member_id}' LIMIT 1"
+        f"SELECT cs.month, cs.amount FROM company_sales cs "
+        f"JOIN client_details cl ON cl.company_id = cs.company_id "
+        f"WHERE cl.member_id = '{member_id}' AND cs.year = {year} AND cs.type = 'actual' "
+        f"ORDER BY cs.month"
     )
     if company_rows and isinstance(company_rows, list):
-        company_id = company_rows[0].get("company_id")
-        sales_rows = db.execute_sql(
-            f"SELECT month, amount FROM company_sales "
-            f"WHERE company_id = '{company_id}' AND year = {year} AND type = 'actual' "
-            f"ORDER BY month"
-        )
-        if sales_rows and isinstance(sales_rows, list):
-            sales = [{"month": r["month"], "amount": float(r["amount"] or 0)} for r in sales_rows]
+        sales = [{"month": r["month"], "amount": float(r["amount"] or 0)} for r in company_rows]
 
     payload = {
         "member_id": member_id,
