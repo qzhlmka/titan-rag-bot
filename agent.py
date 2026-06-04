@@ -115,12 +115,25 @@ def execute_sql(query: str) -> str:
 
     Tables and views:
     - client_company_view: Pre-joined view of clients + their company info. USE THIS for any query involving both client and company data.
-      Columns: member_id, client_name, cam, email, phone, ic_no, start_date, expiry_date, pax, membership_tier,
-               company_id, company_name, brand, industry, nature_of_business, location, total_duration, partner_in_circle, made_in_spire, entiti_bisnes
-      membership_tier is already computed: 'Titan Circle Plus' (TCP prefix) or 'Titanium Circle' (T prefix).
+      Columns: member_id, client_name, cam (Client Account Manager), email, phone, ic_no,
+               start_date, expiry_date (text YYYY-MM-DD), pax (number of people from same company),
+               membership_tier (computed: 'Titan Circle Plus' or 'Titanium Circle'),
+               company_id, company_name, brand, industry, nature_of_business, location,
+               total_duration (membership length), partner_in_circle (has partner in Titanium Circle),
+               made_in_spire (came from Spire), entiti_bisnes (business entity type)
 
-    - company_details: company_id, company_name, brand, industry, nature_of_business, location, total_duration, made_in_spire, register_no, entiti_bisnes, partner_in_circle
-    - client_details: member_id, name, company_id, cam, email, phone, ic_no, start_date, expiry_date, pax
+    - company_details: company_id, company_name, brand, industry, nature_of_business, location,
+        total_duration (how long the company has been a member),
+        made_in_spire (whether the client/company comes from Spire),
+        register_no (business registration number),
+        entiti_bisnes (business entity type e.g. Sdn Bhd),
+        partner_in_circle (whether the company has a partner in Titanium Circle)
+    - client_details: member_id, name, company_id,
+        cam (Client Account Manager — staff managing this client),
+        email, phone, ic_no,
+        start_date (membership start date, stored as text YYYY-MM-DD),
+        expiry_date (membership expiry date, stored as text YYYY-MM-DD),
+        pax (number of people from the same company under this membership)
     - company_sales: company_id, year, month, type, amount
       NOTE: company_sales has no company_name — join to company_details on company_id to get it.
 
