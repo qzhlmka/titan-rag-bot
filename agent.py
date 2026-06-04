@@ -283,9 +283,13 @@ def generate_sales_slides(company_name: str, year: Optional[int] = None) -> str:
 
 def _trigger_slide_script(env_key: str, chat_id: int, thread_id: int = None, extra: dict = None) -> str:
     """Helper to call a Google Apps Script Web App and return status."""
+    import logging
+    logging.getLogger(__name__).info("_trigger_slide_script: chat_id=%s thread_id=%s extra=%s", chat_id, thread_id, extra)
     url = os.environ.get(env_key)
     if not url:
         return f"Slide script is not configured ({env_key})."
+    if not chat_id:
+        return "Chat ID not available — cannot trigger slide script."
     params = {"chat_id": chat_id}
     if thread_id:
         params["thread_id"] = thread_id
