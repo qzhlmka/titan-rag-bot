@@ -181,7 +181,10 @@ def update_client_sales(
     """Update a client's sales record in the CRM system.
     Use when the user wants to update, add, or record sales for a specific client.
     Always look up the client in the database first to get both member_id and full name.
-    month should be a number (1-12)."""
+    month should be a number (1-12). Only 2026 is allowed — reject any other year."""
+    if year != 2026:
+        return "Sales updates are only allowed for 2026."
+
     webhook_url = os.environ.get("CRM_WEBHOOK_URL")
     if not webhook_url:
         return "CRM webhook is not configured."
