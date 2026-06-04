@@ -145,6 +145,12 @@ def execute_sql(query: str) -> str:
 
     When the user asks about "clients" achieving sales targets, they mean companies (sales are per company, not per person).
 
+    CRITICAL — avoid double-counting sales:
+    - NEVER join client_company_view with company_sales to calculate totals. A company with 2 clients produces 2 rows in client_company_view, so joining with company_sales will double the sales figure.
+    - For any sales calculation or aggregation, always join company_details with company_sales (not client_company_view).
+    - Only use client_company_view when you need client-specific fields (name, email, member_id, cam, etc.) WITHOUT any sales aggregation.
+    - If you need both client info AND sales totals in one result, use a subquery: calculate sales from company_details+company_sales first, then join the result to client info.
+
     Example — companies with sales > 10M in 2026:
     SELECT cd.company_name, SUM(cs.amount) AS total_sales
     FROM company_details cd
