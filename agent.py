@@ -281,6 +281,81 @@ def generate_sales_slides(company_name: str, year: Optional[int] = None) -> str:
     return f"Sales presentation for {company_name} has been generated and will be sent to you now."
 
 
+def _trigger_slide_script(env_key: str, chat_id: int, thread_id: int = None, extra: dict = None) -> str:
+    """Helper to call a Google Apps Script Web App and return status."""
+    url = os.environ.get(env_key)
+    if not url:
+        return f"Slide script is not configured ({env_key})."
+    params = {"chat_id": chat_id}
+    if thread_id:
+        params["thread_id"] = thread_id
+    if extra:
+        params.update(extra)
+    try:
+        resp = httpx.get(url, params=params, follow_redirects=True, timeout=60)
+        data = resp.json()
+        if data.get("error"):
+            return f"Script error: {data['error']}"
+        return "ok"
+    except Exception as e:
+        return f"Failed to reach script: {str(e)}"
+
+
+# Chat context for slide tools — set by bot.py before invoking agent
+_current_chat_id: int = None
+_current_thread_id: int = None
+
+
+@tool
+def generate_top100_sales_slide() -> str:
+    """Generate the Top 100 companies by sales slide and send it to the chat.
+    Use when the user asks for the top 100 sales slide or ranking presentation."""
+    result = _trigger_slide_script("TOP100_SLIDES_URL", _current_chat_id, _current_thread_id)
+    if result == "ok":
+        return "Top 100 Sales slide is being generated and will be sent here when ready."
+    return result
+
+
+@tool
+def generate_company_sales_slide(company_name: str) -> str:
+    """Generate an individual sales slide for a specific company and send it to the chat.
+    Use when the user asks for a sales slide, sales report, or sales presentation for a specific company (no chart)."""
+    result = _trigger_slide_script("COMPANY_SALES_SLIDE_URL", _current_chat_id, _current_thread_id, {"company_name": company_name})
+    if result == "ok":
+        return f"Sales slide for {company_name} is being generated and will be sent here when ready."
+    return result
+
+
+@tool
+def generate_company_sales_chart_slide(company_name: str) -> str:
+    """Generate an individual sales slide WITH a chart for a specific company and send it to the chat.
+    Use when the user asks for a sales slide with chart, or a sales and chart presentation for a specific company."""
+    result = _trigger_slide_script("COMPANY_SALES_CHART_SLIDE_URL", _current_chat_id, _current_thread_id, {"company_name": company_name})
+    if result == "ok":
+        return f"Sales and chart slide for {company_name} is being generated and will be sent here when ready."
+    return result
+
+
+@tool
+def generate_company_chart_slide(company_name: str) -> str:
+    """Generate a chart-only slide for a specific company and send it to the chat.
+    Use when the user asks for a chart slide or chart presentation for a specific company (no sales table)."""
+    result = _trigger_slide_script("COMPANY_CHART_SLIDE_URL", _current_chat_id, _current_thread_id, {"company_name": company_name})
+    if result == "ok":
+        return f"Chart slide for {company_name} is being generated and will be sent here when ready."
+    return result
+
+
+@tool
+def generate_top100_chart_slide() -> str:
+    """Generate the Top 100 companies chart slide and send it to the chat.
+    Use when the user asks for the top 100 chart slide or top 100 chart presentation."""
+    result = _trigger_slide_script("TOP100_CHART_SLIDE_URL", _current_chat_id, _current_thread_id)
+    if result == "ok":
+        return "Top 100 Chart slide is being generated and will be sent here when ready."
+    return result
+
+
 TOOLS = [
     semantic_search,
     search_clients,
@@ -292,6 +367,11 @@ TOOLS = [
     execute_sql,
     generate_sales_slides,
     update_client_sales,
+    generate_top100_sales_slide,
+    generate_company_sales_slide,
+    generate_company_sales_chart_slide,
+    generate_company_chart_slide,
+    generate_top100_chart_slide,
 ]
 
 SYSTEM_PROMPT = """You are a helpful assistant for Titan Database — a CRM containing client and company records.

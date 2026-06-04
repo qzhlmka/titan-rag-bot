@@ -185,6 +185,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Groups: use typing indicator + send full message
         await update.message.chat.send_action(ChatAction.TYPING)
         try:
+            agent._current_chat_id = chat_id
+            agent._current_thread_id = update.message.message_thread_id
             answer, history = agent.ask(user_input, history)
             _histories[chat_id] = history[-MAX_HISTORY * 2:]
         except Exception as e:
@@ -211,6 +213,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         error = None
 
         try:
+            agent._current_chat_id = chat_id
+            agent._current_thread_id = update.message.message_thread_id
             async for chunk in agent.ask_stream(user_input, history):
                 full_text += chunk
                 if len(full_text) - last_sent_len >= 40:
