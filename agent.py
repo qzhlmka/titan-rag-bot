@@ -212,8 +212,20 @@ def update_client_sales(
         f"WHERE cl.member_id = '{member_id}' AND cs.year = {year} AND cs.type = 'actual' "
         f"ORDER BY cs.month"
     )
+    month_names = {
+        1: "jan", 2: "feb", 3: "mar", 4: "apr", 5: "may", 6: "jun",
+        7: "jul", 8: "aug", 9: "sep", 10: "oct", 11: "nov", 12: "dec"
+    }
+
+    # Build sales dict from existing data
+    sales_dict = {}
     if company_rows and isinstance(company_rows, list):
-        sales = [{"month": r["month"], "amount": float(r["amount"] or 0)} for r in company_rows]
+        for r in company_rows:
+            key = f"{month_names[r['month']]} {year}"
+            sales_dict[key] = float(r["amount"] or 0)
+
+    # Override with the updated figure
+    sales_dict[f"{month_names[month]} {year}"] = amount
 
     payload = {
         "member_id": member_id,
@@ -221,7 +233,7 @@ def update_client_sales(
         "year": year,
         "month": month,
         "amount": amount,
-        "sales": sales,
+        **sales_dict,
     }
 
     try:
