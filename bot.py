@@ -102,11 +102,20 @@ async def _send_draft(token: str, chat_id: int, draft_id: int, text: str = "") -
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 Hello! I'm the Titan Database assistant.\n\n"
-        "Ask me anything about your clients and companies, for example:\n"
-        "• *Who are the clients from Iyziq?*\n"
-        "• *Show me health & wellness companies in KL*\n"
-        "• *Which memberships expire this month?*\n"
-        "• *What are the 2024 sales for Sabella Luxe?*",
+        "Here's what I can help you with:\n\n"
+        "🔍 *Client & Company Lookup*\n"
+        "• Who are the clients from Iyziq?\n"
+        "• Show me health & wellness companies in KL\n"
+        "• Which memberships expire this month?\n\n"
+        "📊 *Sales & Performance*\n"
+        "• What are the 2025 sales for Sabella Luxe?\n"
+        "• /topsales — view top performing companies\n\n"
+        "📝 *Coaching Summary*\n"
+        "• /oneonone — upload a transcript to generate a 1-on-1 session summary\n\n"
+        "🛠 *Other Commands*\n"
+        "• /clear — clear conversation history\n"
+        "• /updatedatabase — sync the database\n\n"
+        "_In a group, mention me with @username to chat._",
         parse_mode=ParseMode.MARKDOWN,
     )
 
