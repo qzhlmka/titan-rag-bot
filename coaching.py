@@ -147,12 +147,12 @@ def process_transcript(transcript: str, chat_id: int, client_name: str = None, b
     """
     client = _get_openai()
 
-    # Step 1: Extract date from transcript (client/business name provided by user)
+    # Step 1: Extract date from transcript — always at the top, DD/MM/YYYY format
     extract = client.chat.completions.create(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content": "Extract from this coaching transcript: date (session date in YYYY-MM-DD, use today if not found). Return ONLY a JSON object with key: date."},
-            {"role": "user", "content": transcript[:3000]},
+            {"role": "system", "content": "Extract the session date from this coaching transcript. The date is at the top of the transcript and uses DD/MM/YYYY format (Malaysian). Convert it to YYYY-MM-DD. Return ONLY a JSON object with key: date. If no date is found, return an empty string."},
+            {"role": "user", "content": transcript[:500]},
         ],
         response_format={"type": "json_object"},
     )
