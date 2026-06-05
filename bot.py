@@ -444,7 +444,7 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
 
             elif tc.function.name == "semantic_search":
                 import agent as _agent
-                tool_result = _agent.semantic_search(args.get("query", ""), limit=5)
+                tool_result = _agent.semantic_search.func(args.get("query", ""), limit=5)
 
             elif tc.function.name == "confirm_and_process":
                 member_id = args.get("member_id", "")
