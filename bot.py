@@ -269,13 +269,27 @@ _IDENTIFICATION_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_clients",
-            "description": "Search for clients in the CRM database by name and/or company name.",
+            "description": "Search for clients by name and/or company name (partial match).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Client name (partial ok)"},
                     "company_name": {"type": "string", "description": "Company/business name (partial ok)"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "semantic_search",
+            "description": "Fuzzy/semantic search across all client and company records. Use this when search_clients returns no results or the name might be spelled differently.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Name or description to search for"},
+                },
+                "required": ["query"],
             },
         },
     },
@@ -301,12 +315,12 @@ _IDENTIFICATION_SYSTEM = """You are an assistant helping identify a coaching ses
 
 Your job:
 1. Read the transcript excerpt and try to identify the client's name and company.
-2. If you can find a name or company, search Supabase using the search_clients tool.
+2. Search using search_clients. If it returns no results, fall back to semantic_search with the name or company — it handles fuzzy/misspelled names.
 3. Tell the user what you found — show their name, company, and member ID — and ask them to confirm.
 4. If multiple matches, present them clearly and ask which one.
 5. Once the user confirms, call confirm_and_process immediately.
 
-If the transcript does not mention the client's name or company at all, simply ask the user: "Who is this session for? Please tell me the client's name or company." Then search Supabase using whatever they provide.
+If the transcript has no client info, ask the user who the session is for, then search using both tools if needed.
 
 Be concise and conversational. Don't ask unnecessary questions."""
 
@@ -427,6 +441,10 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
                 for r in results:
                     search_cache[r.get("member_id", "")] = r
                 tool_result = _json.dumps(results)
+
+            elif tc.function.name == "semantic_search":
+                import agent as _agent
+                tool_result = _agent.semantic_search(args.get("query", ""), limit=5)
 
             elif tc.function.name == "confirm_and_process":
                 member_id = args.get("member_id", "")
