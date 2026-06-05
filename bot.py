@@ -7,13 +7,15 @@ from html import escape
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import BotCommand
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
 load_dotenv()
 
 import agent
-import database as db
 import coaching
+import database
+import database as db
 
 # Allowlist cache: {chat_id: bool}, refreshed every 5 minutes
 _allowed_cache: dict = {}
@@ -250,37 +252,206 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 os.remove(file_path)
 
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_allowed(update.message.chat_id):
-        await update.message.reply_text("You do not have access to this bot. Please contact the administrator.")
-        return
+AI_CONVERSATION, ASK_TRANSCRIPT = range(2)
 
-    doc = update.message.document
-    if not doc or not doc.file_name or not doc.file_name.endswith(".txt"):
-        await update.message.reply_text("Please send a .txt file containing the coaching session transcript.")
-        return
+_IDENTIFICATION_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_clients",
+            "description": "Search for clients in the CRM database by name and/or company name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Client name (partial ok)"},
+                    "company_name": {"type": "string", "description": "Company/business name (partial ok)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "confirm_and_process",
+            "description": "Call this once you have identified the correct client and the user has confirmed. Triggers transcript processing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "member_id": {"type": "string", "description": "The member_id of the confirmed client record"},
+                    "client_name": {"type": "string", "description": "Full name of the confirmed client"},
+                    "business_name": {"type": "string", "description": "Business/company name"},
+                },
+                "required": ["client_name", "business_name"],
+            },
+        },
+    },
+]
 
-    await update.message.reply_text("Transcript received. Processing coaching summary, please wait...")
-    await update.message.chat.send_action(ChatAction.TYPING)
+_IDENTIFICATION_SYSTEM = """You are an assistant helping identify a coaching session client from a transcript.
 
-    try:
+Your job:
+1. Read the transcript excerpt and try to identify the client's name and company.
+2. If you can find a name or company, search Supabase using the search_clients tool.
+3. Tell the user what you found — show their name, company, and member ID — and ask them to confirm.
+4. If multiple matches, present them clearly and ask which one.
+5. Once the user confirms, call confirm_and_process immediately.
+
+If the transcript does not mention the client's name or company at all, simply ask the user: "Who is this session for? Please tell me the client's name or company." Then search Supabase using whatever they provide.
+
+Be concise and conversational. Don't ask unnecessary questions."""
+
+
+async def _extract_transcript(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Extract transcript text from a document or text message."""
+    if update.message.document:
+        doc = update.message.document
+        fname = (doc.file_name or "").lower()
+        if not (fname.endswith(".txt") or fname.endswith(".docx") or fname.endswith(".pdf")):
+            return None
         file = await context.bot.get_file(doc.file_id)
         content = await file.download_as_bytearray()
-        transcript = content.decode("utf-8", errors="ignore")
+        if fname.endswith(".txt"):
+            return content.decode("utf-8", errors="ignore")
+        elif fname.endswith(".docx"):
+            import io, docx
+            doc_obj = docx.Document(io.BytesIO(bytes(content)))
+            return "\n".join(p.text for p in doc_obj.paragraphs if p.text.strip())
+        elif fname.endswith(".pdf"):
+            import io, pdfplumber
+            with pdfplumber.open(io.BytesIO(bytes(content))) as pdf:
+                return "\n".join(page.extract_text() or "" for page in pdf.pages)
+    elif update.message.text:
+        return update.message.text.strip()
+    return None
 
-        loop = asyncio.get_event_loop()
-        markdown, _ = await loop.run_in_executor(
-            None, coaching.process_transcript, transcript, update.message.chat_id
+
+async def coaching_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update.message.chat_id):
+        await update.message.reply_text("You do not have access to this bot. Please contact the administrator.")
+        return ConversationHandler.END
+
+    transcript = await _extract_transcript(update, context)
+    if transcript:
+        context.user_data["transcript"] = transcript
+        context.user_data["ai_messages"] = []
+        context.user_data["search_cache"] = {}
+        await update.message.chat.send_action(ChatAction.TYPING)
+        return await _run_identification_agent(update, context)
+    return ConversationHandler.END
+
+
+async def coaching_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update.message.chat_id):
+        await update.message.reply_text("You do not have access to this bot. Please contact the administrator.")
+        return ConversationHandler.END
+    await update.message.reply_text("Please send the transcript file (.txt, .docx, or .pdf) or paste the transcript text.")
+    return ASK_TRANSCRIPT
+
+
+async def received_transcript(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    transcript = await _extract_transcript(update, context)
+    if not transcript:
+        await update.message.reply_text("Could not read the transcript. Please send a .txt, .docx, or .pdf file, or paste the text.")
+        return ASK_TRANSCRIPT
+    context.user_data["transcript"] = transcript
+    context.user_data["ai_messages"] = []
+    context.user_data["search_cache"] = {}
+    await update.message.chat.send_action(ChatAction.TYPING)
+    return await _run_identification_agent(update, context)
+
+
+async def ai_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    messages = context.user_data.setdefault("ai_messages", [])
+    messages.append({"role": "user", "content": update.message.text.strip()})
+    await update.message.chat.send_action(ChatAction.TYPING)
+    return await _run_identification_agent(update, context)
+
+
+async def _run_identification_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Run the AI identification loop until it sends a message or calls confirm_and_process."""
+    import json as _json
+    from openai import OpenAI
+
+    openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    transcript = context.user_data.get("transcript", "")
+    messages = context.user_data.setdefault("ai_messages", [])
+    search_cache: dict = context.user_data.setdefault("search_cache", {})
+
+    system_msg = {"role": "system", "content": _IDENTIFICATION_SYSTEM + f"\n\nTranscript excerpt:\n{transcript[:2500]}"}
+
+    while True:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[system_msg] + messages,
+            tools=_IDENTIFICATION_TOOLS,
+            tool_choice="auto",
         )
+        msg = response.choices[0].message
+        tool_calls = msg.tool_calls or []
 
-        formatted = md_to_html(markdown)
-        for i in range(0, len(formatted), 4096):
-            await update.message.reply_text(formatted[i:i + 4096], parse_mode=ParseMode.HTML)
-        await update.message.reply_text("Summary has been sent to Make successfully.")
+        # Append assistant turn (preserve tool_calls for the message history)
+        assistant_entry = {"role": "assistant", "content": msg.content or ""}
+        if tool_calls:
+            assistant_entry["tool_calls"] = [
+                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in tool_calls
+            ]
+        messages.append(assistant_entry)
 
-    except Exception as e:
-        logger.error("Coaching transcript error: %s", e, exc_info=True)
-        await update.message.reply_text("Failed to process transcript. Please try again.")
+        if not tool_calls:
+            # Plain text reply — send to user and wait for their response
+            await update.message.reply_text(msg.content or "...")
+            return AI_CONVERSATION
+
+        # Process tool calls
+        confirmed = False
+        for tc in tool_calls:
+            args = _json.loads(tc.function.arguments)
+
+            if tc.function.name == "search_clients":
+                results = database.search_clients(
+                    name=args.get("name", ""),
+                    company_name=args.get("company_name", ""),
+                    limit=5,
+                )
+                for r in results:
+                    search_cache[r.get("member_id", "")] = r
+                tool_result = _json.dumps(results)
+
+            elif tc.function.name == "confirm_and_process":
+                member_id = args.get("member_id", "")
+                client_name = args["client_name"]
+                business_name = args["business_name"]
+                client_record = search_cache.get(member_id, {})
+
+                await update.message.reply_text(f"Got it! Processing summary for {client_name} ({business_name})...")
+                await update.message.chat.send_action(ChatAction.TYPING)
+                try:
+                    loop = asyncio.get_event_loop()
+                    markdown, _ = await loop.run_in_executor(
+                        None, coaching.process_transcript, transcript, update.message.chat_id, client_name, business_name, client_record, update.message.message_thread_id
+                    )
+                    formatted = md_to_html(markdown)
+                    for i in range(0, len(formatted), 4096):
+                        await update.message.reply_text(formatted[i:i + 4096], parse_mode=ParseMode.HTML)
+                    await update.message.reply_text("Summary has been sent to Make successfully.")
+                except Exception as e:
+                    logger.error("Coaching transcript error: %s", e, exc_info=True)
+                    await update.message.reply_text("Failed to process transcript. Please try again.")
+
+                context.user_data.clear()
+                confirmed = True
+                tool_result = "Processing triggered."
+
+            else:
+                tool_result = "Unknown tool."
+
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
+
+        if confirmed:
+            return ConversationHandler.END
+        # Loop back to let the AI respond after tool results
+
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -289,14 +460,40 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
-    app = Application.builder().token(token).build()
+
+    async def post_init(application: Application) -> None:
+        await application.bot.set_my_commands([
+            BotCommand("start", "Start the bot"),
+            BotCommand("oneonone", "Generate a 1-on-1 coaching session summary"),
+            BotCommand("topsales", "View top performing companies by sales"),
+            BotCommand("updatedatabase", "Sync and update the database"),
+            BotCommand("clear", "Clear conversation history"),
+        ])
+
+    app = Application.builder().token(token).post_init(post_init).build()
+
+    coaching_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("oneonone", coaching_command),
+        ],
+        states={
+            ASK_TRANSCRIPT: [
+                MessageHandler(filters.Document.ALL | filters.TEXT & ~filters.COMMAND, received_transcript)
+            ],
+            AI_CONVERSATION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ai_conversation)
+            ],
+        },
+        fallbacks=[],
+        per_chat=True,
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("updatedatabase", updatedatabase))
     app.add_handler(CommandHandler("topsales", topsales))
+    app.add_handler(coaching_conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_error_handler(error_handler)
 
     logger.info("Bot started. Polling...")

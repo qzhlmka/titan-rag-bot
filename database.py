@@ -126,7 +126,7 @@ def list_companies(
     return result.data or []
 
 
-def execute_sql(query: str) -> list[dict] | str:
+def execute_sql(query: str):
     try:
         result = get_client().rpc("execute_readonly_sql", {"query": query.rstrip("; \n")}).execute()
         data = result.data
