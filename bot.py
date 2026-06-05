@@ -13,6 +13,7 @@ load_dotenv()
 
 import agent
 import database as db
+import coaching
 
 # Allowlist cache: {chat_id: bool}, refreshed every 5 minutes
 _allowed_cache: dict = {}
@@ -249,6 +250,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 os.remove(file_path)
 
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update.message.chat_id):
+        await update.message.reply_text("You do not have access to this bot. Please contact the administrator.")
+        return
+
+    doc = update.message.document
+    if not doc or not doc.file_name or not doc.file_name.endswith(".txt"):
+        await update.message.reply_text("Please send a .txt file containing the coaching session transcript.")
+        return
+
+    await update.message.reply_text("Transcript received. Processing coaching summary, please wait...")
+    await update.message.chat.send_action(ChatAction.TYPING)
+
+    try:
+        file = await context.bot.get_file(doc.file_id)
+        content = await file.download_as_bytearray()
+        transcript = content.decode("utf-8", errors="ignore")
+
+        loop = asyncio.get_event_loop()
+        markdown, _ = await loop.run_in_executor(
+            None, coaching.process_transcript, transcript, update.message.chat_id
+        )
+
+        formatted = md_to_html(markdown)
+        for i in range(0, len(formatted), 4096):
+            await update.message.reply_text(formatted[i:i + 4096], parse_mode=ParseMode.HTML)
+        await update.message.reply_text("Summary has been sent to Make successfully.")
+
+    except Exception as e:
+        logger.error("Coaching transcript error: %s", e, exc_info=True)
+        await update.message.reply_text("Failed to process transcript. Please try again.")
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Update caused error: %s", context.error, exc_info=True)
 
@@ -262,6 +296,7 @@ def main() -> None:
     app.add_handler(CommandHandler("updatedatabase", updatedatabase))
     app.add_handler(CommandHandler("topsales", topsales))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_error_handler(error_handler)
 
     logger.info("Bot started. Polling...")
