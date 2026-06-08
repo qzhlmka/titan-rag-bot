@@ -16,6 +16,7 @@ import agent
 import coaching
 import database
 import database as db
+import report
 
 # Allowlist cache: {chat_id: bool}, refreshed every 5 minutes
 _allowed_cache: dict = {}
@@ -70,7 +71,42 @@ def md_to_html(text: str) -> str:
     text = re.sub(r'\*([^*\n]+?)\*', r'<i>\1</i>', text)
     # `code`
     text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    # Markdown tables → clean Telegram list
+    text = _convert_tables(text)
     return text
+
+
+def _convert_tables(text: str) -> str:
+    """Convert markdown tables to a readable Telegram-friendly format."""
+    lines = text.split("\n")
+    result = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Detect table header row (contains |)
+        if "|" in line and i + 1 < len(lines) and re.match(r"^\s*\|[\s\-|:]+\|\s*$", lines[i + 1]):
+            headers = [h.strip() for h in line.strip().strip("|").split("|")]
+            i += 2  # skip separator row
+            rows = []
+            while i < len(lines) and "|" in lines[i]:
+                cols = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                rows.append(cols)
+                i += 1
+            # Format: if 2 columns, render as "🔹 <b>col1</b> — col2"
+            if len(headers) == 2:
+                for row in rows:
+                    c1 = row[0] if len(row) > 0 else ""
+                    c2 = row[1] if len(row) > 1 else ""
+                    result.append(f"🔹 <b>{c1}</b>\n    {c2}")
+            else:
+                # Multi-column: render as indented block per row
+                for row in rows:
+                    parts = [f"<b>{headers[j]}</b>: {row[j]}" for j in range(min(len(headers), len(row)))]
+                    result.append("• " + " | ".join(parts))
+        else:
+            result.append(line)
+            i += 1
+    return "\n".join(result)
 
 # Per-chat conversation history: {chat_id: [messages]}
 _histories: dict = {}
@@ -112,7 +148,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Update Iyziq sales for March to RM15,000\n"
         "• /topsales — generate a slide for the top 100 companies by sales\n\n"
         "📝 *Coaching Summary*\n"
-        "• /oneonone — upload a transcript to generate a 1-on-1 session summary\n\n"
+        "• /oneonone — upload a transcript to generate a 1-on-1 session summary\n"
+        "• /dailyreport — generate executive summary of today's 1-on-1 sessions\n\n"
         "🛠 *Other Commands*\n"
         "• /clear — clear conversation history\n"
         "• /updatedatabase — sync the database\n\n"
@@ -169,6 +206,26 @@ async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error("topsales error: %s", e, exc_info=True)
         await update.message.reply_text("Failed to reach the script. Please try again.")
+
+
+async def dailyreport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update.message.chat_id):
+        await update.message.reply_text("You do not have access to this bot. Please contact the administrator.")
+        return
+    await update.message.reply_text("Generating daily coaching report, please wait...")
+    await update.message.chat.send_action(ChatAction.TYPING)
+    try:
+        loop = asyncio.get_event_loop()
+        content, count = await loop.run_in_executor(None, report.generate_daily_report)
+        if count == 0:
+            await update.message.reply_text(content)
+            return
+        formatted = md_to_html(content)
+        for i in range(0, len(formatted), 4096):
+            await update.message.reply_text(formatted[i:i + 4096], parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error("Daily report error: %s", e, exc_info=True)
+        await update.message.reply_text("Failed to generate report. Please try again.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -495,6 +552,7 @@ def main() -> None:
             BotCommand("oneonone", "Generate a 1-on-1 coaching session summary"),
             BotCommand("topsales", "View top performing companies by sales"),
             BotCommand("updatedatabase", "Sync and update the database"),
+            BotCommand("dailyreport", "Generate executive summary of today's coaching sessions"),
             BotCommand("clear", "Clear conversation history"),
         ])
 
@@ -520,6 +578,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("updatedatabase", updatedatabase))
     app.add_handler(CommandHandler("topsales", topsales))
+    app.add_handler(CommandHandler("dailyreport", dailyreport))
     app.add_handler(coaching_conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)

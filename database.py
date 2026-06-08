@@ -156,6 +156,29 @@ def get_top_companies_by_sales(
     return result.data or []
 
 
+def save_coaching_session(payload: dict, session_date: str, client_name: str, business_name: str, member_id: str, cam: str) -> None:
+    get_client().from_("coaching_sessions").insert({
+        "session_date": session_date,
+        "client_name": client_name,
+        "business_name": business_name,
+        "member_id": member_id,
+        "cam": cam,
+        "payload": payload,
+    }).execute()
+
+
+def get_sessions_by_date(date_str: str) -> list[dict]:
+    result = (
+        get_client()
+        .from_("coaching_sessions")
+        .select("*")
+        .eq("session_date", date_str)
+        .order("created_at")
+        .execute()
+    )
+    return result.data or []
+
+
 def get_expiring_memberships(within_days: int = 30) -> list[dict]:
     from datetime import date, timedelta
     today = date.today().isoformat()

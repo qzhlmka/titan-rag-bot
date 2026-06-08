@@ -272,6 +272,20 @@ Target Jualan 2026: {payload.get('target2026', '')}
     if webhook_url:
         httpx.post(webhook_url, json=payload, timeout=30)
 
+    # Step 6: Save session to Supabase for daily report
+    try:
+        db.save_coaching_session(
+            payload=payload,
+            session_date=session_date or str(__import__("datetime").date.today()),
+            client_name=client_name or "",
+            business_name=business_name or "",
+            member_id=data.get("member_id", ""),
+            cam=data.get("cam", ""),
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Failed to save coaching session: %s", e)
+
     return markdown, payload
 
 
