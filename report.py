@@ -1,4 +1,6 @@
+import json
 import os
+import httpx
 from datetime import date
 from openai import OpenAI
 
@@ -14,51 +16,176 @@ def _get_openai() -> OpenAI:
     return _openai_client
 
 
-REPORT_SYSTEM_PROMPT = """Please analyze the documents and produce a professional, leadership-level executive summary report using this format:
+REPORT_SYSTEM_PROMPT = """You are generating a professional executive summary of a day's 1-on-1 business coaching sessions for internal leadership including Datuk Wira.
+
+Return ONLY a JSON object with EXACTLY these fields (all content in Bahasa Malaysia unless specified):
+
+{
+  "TARIKH": "Session date in YYYY-MM-DD",
+  "JUMLAH_KLIEN": "Total number of clients as integer",
+  "INDUSTRI_TERLIBAT": "Comma-separated list of industries represented",
+  "JULAT_JUALAN_SEMASA": "RM[X] – RM[X] revenue range for current year (2025)",
+  "SASARAN_JUALAN": "RM[X] – RM[X] target revenue range for next year (2026)",
+  "EXEC_SUMMARY": "2–3 sentence strategic overview. Highlight overall market demand strength, common structural challenges, and the leadership readiness theme.",
+
+  "ISSUE_1_TITLE": "", "ISSUE_1_DESCRIPTION": "",
+  "CLIENT_1A_NAME": "", "CLIENT_1A_COMPANY": "", "CLIENT_1A_EXAMPLE": "",
+  "CLIENT_1B_NAME": "", "CLIENT_1B_COMPANY": "", "CLIENT_1B_EXAMPLE": "",
+
+  "ISSUE_2_TITLE": "", "ISSUE_2_DESCRIPTION": "",
+  "CLIENT_2A_NAME": "", "CLIENT_2A_COMPANY": "", "CLIENT_2A_EXAMPLE": "",
+  "CLIENT_2B_NAME": "", "CLIENT_2B_COMPANY": "", "CLIENT_2B_EXAMPLE": "",
+
+  "ISSUE_3_TITLE": "", "ISSUE_3_DESCRIPTION": "",
+  "CLIENT_3A_COMPANY": "", "CLIENT_3A_EXAMPLE": "",
+  "CLIENT_3B_COMPANY": "", "CLIENT_3B_EXAMPLE": "",
+
+  "ISSUE_4_TITLE": "", "ISSUE_4_DESCRIPTION": "",
+  "CLIENT_4A_COMPANY": "", "CLIENT_4A_EXAMPLE": "",
+  "CLIENT_4B_COMPANY": "", "CLIENT_4B_EXAMPLE": "",
+
+  "ISSUE_5_TITLE": "", "ISSUE_5_DESCRIPTION": "",
+  "CLIENT_5A_COMPANY": "", "CLIENT_5A_EXAMPLE": "",
+  "CLIENT_5B_COMPANY": "", "CLIENT_5B_EXAMPLE": "",
+
+  "ISSUE_6_TITLE": "", "ISSUE_6_DESCRIPTION": "",
+  "CLIENT_6A_COMPANY": "", "CLIENT_6A_EXAMPLE": "",
+  "CLIENT_6B_COMPANY": "", "CLIENT_6B_EXAMPLE": "",
+
+  "ISSUE_7_TITLE": "", "ISSUE_7_DESCRIPTION": "",
+  "CLIENT_7A_COMPANY": "", "CLIENT_7A_EXAMPLE": "",
+  "CLIENT_7B_COMPANY": "", "CLIENT_7B_EXAMPLE": "",
+
+  "ISSUE_8_TITLE": "", "ISSUE_8_DESCRIPTION": "",
+  "CLIENT_8A_COMPANY": "", "CLIENT_8A_EXAMPLE": "",
+  "CLIENT_8B_COMPANY": "", "CLIENT_8B_EXAMPLE": "",
+
+  "ISSUE_9_TITLE": "", "ISSUE_9_DESCRIPTION": "",
+  "CLIENT_9A_COMPANY": "", "CLIENT_9A_EXAMPLE": "",
+  "CLIENT_9B_COMPANY": "", "CLIENT_9B_EXAMPLE": "",
+
+  "ISSUE_10_TITLE": "", "ISSUE_10_DESCRIPTION": "",
+  "CLIENT_10A_COMPANY": "", "CLIENT_10A_EXAMPLE": "",
+  "CLIENT_10B_COMPANY": "", "CLIENT_10B_EXAMPLE": "",
+
+  "STRATEGY_AREA_1": "", "STRATEGY_INTERVENTION_1": "",
+  "STRATEGY_AREA_2": "", "STRATEGY_INTERVENTION_2": "",
+  "STRATEGY_AREA_3": "", "STRATEGY_INTERVENTION_3": "",
+  "STRATEGY_AREA_4": "", "STRATEGY_INTERVENTION_4": "",
+  "STRATEGY_AREA_5": "", "STRATEGY_INTERVENTION_5": "",
+  "STRATEGY_AREA_6": "", "STRATEGY_INTERVENTION_6": "",
+  "STRATEGY_AREA_7": "", "STRATEGY_INTERVENTION_7": "",
+
+  "HIGH_PERFORMER_1_COMPANY": "", "HIGH_PERFORMER_1_ANALYSIS": "",
+  "HIGH_PERFORMER_2_COMPANY": "", "HIGH_PERFORMER_2_ANALYSIS": "",
+  "HIGH_PERFORMER_3_COMPANY": "", "HIGH_PERFORMER_3_ANALYSIS": "",
+
+  "RISK_CLIENT_1_COMPANY": "", "RISK_CLIENT_1_ANALYSIS": "",
+  "RISK_CLIENT_2_COMPANY": "", "RISK_CLIENT_2_ANALYSIS": "",
+
+  "LEADERSHIP_INSIGHTS": "2–3 sentence closing insight for Datuk Wira and internal leadership. Focus on the core bottleneck theme across all clients this session."
+}
+
+Rules:
+- Be strategic, sharp, and presentation-ready.
+- ALWAYS fill all 10 issue slots, all 7 strategy slots, and all 3 high performer slots. If sessions are limited, break broad issues into more specific sub-themes, elaborate deeper on each client's situation, or project forward based on available data.
+- For HIGH_PERFORMER fields: if no client is clearly exceeding targets, identify the one(s) with the best relative momentum or highest potential and explain why.
+- Never leave a TITLE, AREA, or COMPANY field empty — always provide a value.
+- Use integer (not string) for JUMLAH_KLIEN."""
+
+
+def _clean(value: str) -> str:
+    """Strip markdown bold/italic from GPT field values to avoid clashing with _format_markdown."""
+    import re
+    value = re.sub(r'\*\*(.+?)\*\*', r'\1', value)
+    value = re.sub(r'\*(.+?)\*', r'\1', value)
+    value = re.sub(r'_(.+?)_', r'\1', value)
+    return value
+
+
+def _format_markdown(p: dict) -> str:
+    def g(key): return _clean(p.get(key, ""))
+    issues = []
+    for n in range(1, 11):
+        title = g(f"ISSUE_{n}_TITLE")
+        if not title:
+            continue
+        desc = g(f"ISSUE_{n}_DESCRIPTION")
+        examples = []
+        for letter in ("A", "B"):
+            name = g(f"CLIENT_{n}{letter}_NAME") or g(f"CLIENT_{n}{letter}_COMPANY")
+            company = g(f"CLIENT_{n}{letter}_COMPANY")
+            example = g(f"CLIENT_{n}{letter}_EXAMPLE")
+            if name or example:
+                label = name
+                if company and company != name:
+                    label += f" ({company})"
+                examples.append(f"  • {label}: {example}")
+        block = f"**{n}. {title}**\n_{desc}_"
+        if examples:
+            block += "\n" + "\n".join(examples)
+        issues.append(block)
+
+    strategies = []
+    for n in range(1, 8):
+        area = g(f"STRATEGY_AREA_{n}")
+        intervention = g(f"STRATEGY_INTERVENTION_{n}")
+        if area:
+            strategies.append(f"🔹 **{area}**\n    {intervention}")
+
+    high = []
+    for n in range(1, 4):
+        company = g(f"HIGH_PERFORMER_{n}_COMPANY")
+        analysis = g(f"HIGH_PERFORMER_{n}_ANALYSIS")
+        if company:
+            high.append(f"  • **{company}**: {analysis}")
+
+    risk = []
+    for n in range(1, 3):
+        company = g(f"RISK_CLIENT_{n}_COMPANY")
+        analysis = g(f"RISK_CLIENT_{n}_ANALYSIS")
+        if company:
+            risk.append(f"  • **{company}**: {analysis}")
+
+    return f"""**🧾 EXECUTIVE SUMMARY – 1-ON-1 BUSINESS COACHING**
+
+📅 Tarikh: {g('TARIKH')}
+👥 Jumlah Klien: {p.get('JUMLAH_KLIEN', '')}
+🏭 Industri: {g('INDUSTRI_TERLIBAT')}
+💰 Julat Jualan 2025: {g('JULAT_JUALAN_SEMASA')}
+🎯 Sasaran 2026: {g('SASARAN_JUALAN')}
+
+_{g('EXEC_SUMMARY')}_
 
 ---
 
-### 🧾 Executive Summary – 1-on-1 Business Coaching
+**🔍 TOP 10 ISU UTAMA**
 
-Date: [Insert Coaching Date]
-Total Clients: [X]
-Industries Represented: [List sectors]
-Revenue Range (2025): RM[X] – RM[X]
-Target Revenue (2026): RM[X] – RM[X]
+{chr(10).join(issues) if issues else 'Tiada data'}
 
 ---
 
-### 🔍 Top 10 Common Issues
+**🎯 HALA TUJU STRATEGIK HARI INI**
 
-For each issue:
-* Issue Title (e.g., Tiada Fokus Produk Utama)
-* 1-line description
-* 2–3 client examples with name, business name, and elaborated context
+{chr(10).join(strategies) if strategies else 'Tiada data'}
 
 ---
 
-### 🎯 Strategic Direction Advised Today
+**📈 POTENSI IMPAK HASIL (AI ESTIMATE)**
 
-List 5–7 dynamic strategic areas based on real interventions from the coaching (do not use a fixed template).
-Each row should have:
-* Area of Focus (e.g. Operational Duplication, Investor Pitch Strategy, SOP Realignment, TikTok Productisation, Team Restructure)
-* Intervention Given (brief, 1-line action or guidance)
+🟢 *Projected High Performers:*
+{chr(10).join(high) if high else '  Tiada data'}
 
-Format as a markdown table.
-
----
-
-### 📈 Potential Revenue Impact (AI Estimate)
-
-* Projected High Performers: List clients likely to exceed 2026 targets, with reasons
-* Projected Risk Clients: List clients at risk of underperforming, with reasons
+🔴 *Projected Risk Clients:*
+{chr(10).join(risk) if risk else '  Tiada data'}
 
 ---
 
-This summary should be strategic, sharply written, and presentation-ready for internal leadership, including Datuk Wira. Use concise, confident language and always support insights with real client examples."""
+**💡 LEADERSHIP INSIGHTS**
+_{g('LEADERSHIP_INSIGHTS')}_"""
 
 
-def generate_daily_report(target_date: str = None) -> tuple[str, int]:
+def generate_daily_report(target_date: str = None, chat_id: int = None, thread_id: int = None) -> tuple[str, int]:
     """
     Generate an executive summary for all coaching sessions on target_date.
     Returns (formatted_markdown, session_count).
@@ -99,6 +226,23 @@ def generate_daily_report(target_date: str = None) -> tuple[str, int]:
             {"role": "system", "content": REPORT_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
+        response_format={"type": "json_object"},
     )
 
-    return response.choices[0].message.content or "Failed to generate report.", len(sessions)
+    structured = json.loads(response.choices[0].message.content)
+
+    import logging
+    logging.getLogger(__name__).info("Daily report JSON keys with values: %s",
+        {k: v for k, v in structured.items() if v})
+
+    # Add Telegram routing fields
+    structured["telegramChatId"] = str(chat_id) if chat_id else ""
+    if thread_id:
+        structured["telegramThreadId"] = str(thread_id)
+
+    # Send to Make webhook
+    webhook_url = os.environ.get("DAILY_REPORT_WEBHOOK_URL")
+    if webhook_url:
+        httpx.post(webhook_url, json=structured, timeout=30)
+
+    return _format_markdown(structured), len(sessions)

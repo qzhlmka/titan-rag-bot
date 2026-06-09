@@ -67,8 +67,9 @@ def md_to_html(text: str) -> str:
     text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
     # **bold**
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
-    # *italic* (single asterisks not already converted)
+    # *italic* and _italic_
     text = re.sub(r'\*([^*\n]+?)\*', r'<i>\1</i>', text)
+    text = re.sub(r'_([^_\n]+?)_', r'<i>\1</i>', text)
     # `code`
     text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
     # Markdown tables → clean Telegram list
@@ -215,14 +216,20 @@ async def dailyreport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text("Generating daily coaching report, please wait...")
     await update.message.chat.send_action(ChatAction.TYPING)
     try:
+        chat_id = update.message.chat_id
+        thread_id = update.message.message_thread_id
         loop = asyncio.get_event_loop()
-        content, count = await loop.run_in_executor(None, report.generate_daily_report)
+        content, count = await loop.run_in_executor(
+            None, report.generate_daily_report, None, chat_id, thread_id
+        )
+
         if count == 0:
             await update.message.reply_text(content)
             return
         formatted = md_to_html(content)
         for i in range(0, len(formatted), 4096):
             await update.message.reply_text(formatted[i:i + 4096], parse_mode=ParseMode.HTML)
+        await update.message.reply_text("Daily report has been sent to Make successfully.")
     except Exception as e:
         logger.error("Daily report error: %s", e, exc_info=True)
         await update.message.reply_text("Failed to generate report. Please try again.")
