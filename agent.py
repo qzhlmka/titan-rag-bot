@@ -300,7 +300,7 @@ def _trigger_slide_script(env_key: str, chat_id: int, thread_id: int = None, ext
         data = resp.json()
         if data.get("error"):
             return f"Script error: {data['error']}"
-        return "ok"
+        return data.get("url") or "ok"
     except Exception as e:
         return f"Failed to reach script: {str(e)}"
 
@@ -325,6 +325,8 @@ def generate_company_sales_slide(company_name: str) -> str:
     """Generate an individual sales slide for a specific company and send it to the chat.
     Use when the user asks for a sales slide, sales report, or sales presentation for a specific company (no chart)."""
     result = _trigger_slide_script("COMPANY_SALES_SLIDE_URL", _current_chat_id, _current_thread_id, {"company_name": company_name})
+    if result and result.startswith("http"):
+        return f"Sales slide for {company_name} is ready! View here: {result}"
     if result == "ok":
         return f"Sales slide for {company_name} is being generated and will be sent here when ready."
     return result
