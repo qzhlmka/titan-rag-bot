@@ -150,7 +150,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /topsales — generate a slide for the top 100 companies by sales\n\n"
         "📝 *Coaching Summary*\n"
         "• /oneonone — upload a transcript to generate a 1-on-1 session summary\n"
-        "• /dailyreport — generate executive summary of today's 1-on-1 sessions\n\n"
+        "• /dailyreport [YYYY-MM-DD] — generate executive summary of coaching sessions (defaults to today)\n\n"
         "🛠 *Other Commands*\n"
         "• /clear — clear conversation history\n"
         "• /updatedatabase — sync the database\n\n"
@@ -209,23 +209,51 @@ async def topsales(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Failed to reach the script. Please try again.")
 
 
-async def dailyreport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+DAILYREPORT_DATE = 100
+
+
+async def dailyreport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_allowed(update.message.chat_id):
         await update.message.reply_text("You do not have access to this bot. Please contact the administrator.")
-        return
-    await update.message.reply_text("Generating daily coaching report, please wait...")
+        return ConversationHandler.END
+    if context.args:
+        return await _run_dailyreport(update, context.args[0])
+    await update.message.reply_text(
+        "Which date would you like the report for?\nReply with a date (YYYY-MM-DD) or type *today*.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return DAILYREPORT_DATE
+
+
+async def dailyreport_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    from datetime import datetime
+    text = update.message.text.strip()
+    if text.lower() == "today":
+        return await _run_dailyreport(update, None)
+    try:
+        datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        await update.message.reply_text(
+            "Invalid format. Please reply with a date in *YYYY-MM-DD* format (e.g. 2026-06-09) or type *today*.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return DAILYREPORT_DATE
+    return await _run_dailyreport(update, text)
+
+
+async def _run_dailyreport(update: Update, target_date: str) -> int:
+    await update.message.reply_text(f"Generating daily coaching report for {target_date or 'today'}, please wait...")
     await update.message.chat.send_action(ChatAction.TYPING)
     try:
         chat_id = update.message.chat_id
         thread_id = update.message.message_thread_id
         loop = asyncio.get_event_loop()
         content, count = await loop.run_in_executor(
-            None, report.generate_daily_report, None, chat_id, thread_id
+            None, report.generate_daily_report, target_date, chat_id, thread_id
         )
-
         if count == 0:
             await update.message.reply_text(content)
-            return
+            return ConversationHandler.END
         formatted = md_to_html(content)
         for i in range(0, len(formatted), 4096):
             await update.message.reply_text(formatted[i:i + 4096], parse_mode=ParseMode.HTML)
@@ -233,6 +261,7 @@ async def dailyreport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as e:
         logger.error("Daily report error: %s", e, exc_info=True)
         await update.message.reply_text("Failed to generate report. Please try again.")
+    return ConversationHandler.END
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -559,7 +588,7 @@ def main() -> None:
             BotCommand("oneonone", "Generate a 1-on-1 coaching session summary"),
             BotCommand("topsales", "View top performing companies by sales"),
             BotCommand("updatedatabase", "Sync and update the database"),
-            BotCommand("dailyreport", "Generate executive summary of today's coaching sessions"),
+            BotCommand("dailyreport", "Generate coaching report. Usage: /dailyreport or /dailyreport YYYY-MM-DD"),
             BotCommand("clear", "Clear conversation history"),
         ])
 
@@ -585,7 +614,13 @@ def main() -> None:
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("updatedatabase", updatedatabase))
     app.add_handler(CommandHandler("topsales", topsales))
-    app.add_handler(CommandHandler("dailyreport", dailyreport))
+    dailyreport_conv = ConversationHandler(
+        entry_points=[CommandHandler("dailyreport", dailyreport)],
+        states={DAILYREPORT_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, dailyreport_date)]},
+        fallbacks=[CommandHandler("dailyreport", dailyreport)],
+        per_chat=True,
+    )
+    app.add_handler(dailyreport_conv)
     app.add_handler(coaching_conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
