@@ -416,7 +416,7 @@ _agent_executor = None
 def _get_executor() -> AgentExecutor:
     global _agent_executor
     if _agent_executor is None:
-        llm = ChatOpenAI(model="gpt-4o", temperature=0, streaming=True)
+        llm = ChatOpenAI(model="gpt-5.4-mini", temperature=0, streaming=True)
         prompt = ChatPromptTemplate.from_messages([
             ("system", SYSTEM_PROMPT),
             MessagesPlaceholder("chat_history"),

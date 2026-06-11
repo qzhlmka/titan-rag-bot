@@ -221,7 +221,7 @@ def generate_daily_report(target_date: str = None, chat_id: int = None, thread_i
 
     client = _get_openai()
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5.4",
         messages=[
             {"role": "system", "content": REPORT_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},

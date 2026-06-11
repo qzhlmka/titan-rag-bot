@@ -149,7 +149,7 @@ def process_transcript(transcript: str, chat_id: int, client_name: str = None, b
 
     # Step 1: Extract date from transcript — always at the top, DD/MM/YYYY format
     extract = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5.4",
         messages=[
             {"role": "system", "content": "Extract the session date from this coaching transcript. The date is at the top of the transcript and uses DD/MM/YYYY format (Malaysian). Convert it to YYYY-MM-DD. Return ONLY a JSON object with key: date. If no date is found, return an empty string."},
             {"role": "user", "content": transcript[:500]},
@@ -201,7 +201,7 @@ Pecahan Bulanan:
 {transcript}"""
 
     summary = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5.4",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
