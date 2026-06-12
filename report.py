@@ -243,6 +243,9 @@ def generate_daily_report(target_date: str = None, chat_id: int = None, thread_i
     # Send to Make webhook
     webhook_url = os.environ.get("DAILY_REPORT_WEBHOOK_URL")
     if webhook_url:
-        httpx.post(webhook_url, json=structured, timeout=30)
+        resp = httpx.post(webhook_url, json=structured, timeout=30)
+        if resp.status_code >= 400:
+            import logging
+            logging.getLogger(__name__).error("Make webhook error %s: %s", resp.status_code, resp.text)
 
     return _format_markdown(structured), len(sessions)

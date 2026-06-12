@@ -1,10 +1,55 @@
 import json
 import os
+import re
 import httpx
+from datetime import date as _date
 from openai import OpenAI
 import database as db
 
+_MONTHS = {
+    'january':1,'february':2,'march':3,'april':4,'may':5,'june':6,
+    'july':7,'august':8,'september':9,'october':10,'november':11,'december':12,
+    'jan':1,'feb':2,'mar':3,'apr':4,'jun':6,'jul':7,'aug':8,
+    'sep':9,'sept':9,'oct':10,'nov':11,'dec':12,
+}
+
+def _parse_date_from_text(text: str) -> str:
+    """Extract session date from the first 500 chars of a transcript using regex."""
+    chunk = text[:500]
+
+    # DD/MM/YYYY or D/M/YYYY
+    m = re.search(r'\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b', chunk)
+    if m:
+        return f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+
+    # "Month DD, YYYY" or "Month DD YYYY" e.g. "June 10, 2026" / "June 10 2026"
+    m = re.search(r'\b([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})\b', chunk)
+    if m and m.group(1).lower() in _MONTHS:
+        return f"{m.group(3)}-{_MONTHS[m.group(1).lower()]:02d}-{int(m.group(2)):02d}"
+
+    # "DD Month YYYY" e.g. "10 June 2026"
+    m = re.search(r'\b(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\b', chunk)
+    if m and m.group(2).lower() in _MONTHS:
+        return f"{m.group(3)}-{_MONTHS[m.group(2).lower()]:02d}-{int(m.group(1)):02d}"
+
+    # "Month DD" with no year — infer current year e.g. "June 10"
+    m = re.search(r'\b([A-Za-z]+)\s+(\d{1,2})\b', chunk)
+    if m and m.group(1).lower() in _MONTHS:
+        return f"{_date.today().year}-{_MONTHS[m.group(1).lower()]:02d}-{int(m.group(2)):02d}"
+
+    return ""
+
 _openai_client = None
+
+
+def _clean(value: str) -> str:
+    """Strip markdown bold/italic from GPT field values."""
+    if not value:
+        return value
+    value = re.sub(r'\*\*(.+?)\*\*', r'\1', value, flags=re.DOTALL)
+    value = re.sub(r'\*(.+?)\*', r'\1', value)
+    value = re.sub(r'_(.+?)_', r'\1', value)
+    return value
 
 
 def _get_openai() -> OpenAI:
@@ -69,14 +114,9 @@ def _get_client_data(client_name: str, business_name: str, client_record: dict =
 
     # Monthly sales 2025 and 2026 — prefer company_id from the confirmed client record
     company_id = company_id_from_record or company_info.get("company_id", "")
-    monthly_rows = db.execute_sql(f"""
-        SELECT year, month, type, amount
-        FROM company_sales
-        WHERE company_id = '{company_id}'
-        AND year IN (2025, 2026)
-        AND type IN ('actual', 'target')
-        ORDER BY year, month
-    """) if company_id else []
+    monthly_rows = db.get_client().from_("company_sales").select("year,month,type,amount") \
+        .eq("company_id", company_id).in_("year", [2025, 2026]).in_("type", ["actual", "target"]) \
+        .order("year").order("month").execute().data if company_id else []
 
     sales2025 = sum(float(r["amount"] or 0) for r in (monthly_rows or []) if isinstance(r, dict) and r.get("year") == 2025 and r.get("type") == "actual")
     sales2026 = sum(float(r["amount"] or 0) for r in (monthly_rows or []) if isinstance(r, dict) and r.get("year") == 2026 and r.get("type") == "actual")
@@ -140,28 +180,35 @@ Rules:
 - Be detailed and elaborative. Total content approximately 4000 characters."""
 
 
-def process_transcript(transcript: str, chat_id: int, client_name: str = None, business_name: str = None, client_record: dict = None, thread_id: int = None) -> tuple[str, dict]:
+def process_transcript(transcript: str, chat_id: int, client_name: str = None, business_name: str = None, client_record: dict = None, thread_id: int = None, client_name_2: str = None, client_record_2: dict = None) -> tuple[str, dict]:
     """
     Process a coaching session transcript.
     Returns (formatted_markdown, payload_dict).
     """
     client = _get_openai()
 
-    # Step 1: Extract date from transcript — always at the top, DD/MM/YYYY format
-    extract = client.chat.completions.create(
-        model="gpt-5.4",
-        messages=[
-            {"role": "system", "content": "Extract the session date from this coaching transcript. The date is at the top of the transcript and uses DD/MM/YYYY format (Malaysian). Convert it to YYYY-MM-DD. Return ONLY a JSON object with key: date. If no date is found, return an empty string."},
-            {"role": "user", "content": transcript[:500]},
-        ],
-        response_format={"type": "json_object"},
-    )
-    extracted = json.loads(extract.choices[0].message.content)
+    # Step 1: Extract date — regex first, GPT fallback
+    import logging as _logging
+    session_date = _parse_date_from_text(transcript)
+    _logging.getLogger(__name__).info("Date extraction — regex result: %r | transcript[:100]: %r", session_date, transcript[:100])
+    if not session_date:
+        extract = client.chat.completions.create(
+            model="gpt-5.4",
+            messages=[
+                {"role": "system", "content": f"Today is {_date.today().isoformat()}. Extract the session date from this coaching transcript. The date may appear in any format. Convert it to YYYY-MM-DD. Return ONLY a JSON object with key: date. If no date is found, return {{\"date\": \"\"}}."},
+                {"role": "user", "content": transcript[:1000]},
+            ],
+            response_format={"type": "json_object"},
+        )
+        extracted = json.loads(extract.choices[0].message.content)
+        session_date = extracted.get("date", "")
+        _logging.getLogger(__name__).info("Date extraction — GPT fallback result: %r", session_date)
     if not client_name:
         client_name = "Unknown"
+    if client_name_2:
+        client_name = f"{client_name}\n{client_name_2}"
     if not business_name:
         business_name = "Unknown"
-    session_date = extracted.get("date", "")
 
     # Step 2: Fetch comprehensive data from Supabase using provided names
     data = _get_client_data(client_name, business_name, client_record or {})
@@ -211,6 +258,10 @@ Pecahan Bulanan:
 
     payload = json.loads(summary.choices[0].message.content)
 
+    # Enforce extracted date if GPT missed it
+    if not payload.get("date") and session_date:
+        payload["date"] = session_date
+
     # Enforce Supabase sales figures
     payload["sales2025"] = data["sales2025"]
     payload["sales2026"] = data["sales2026"]
@@ -220,37 +271,38 @@ Pecahan Bulanan:
         payload["telegramThreadId"] = str(thread_id)
 
     # Step 4: Format markdown preview for Telegram
+    def g(key): return _clean(payload.get(key, '') or '')
     markdown = f"""**RINGKASAN SESI COACHING**
 
 ---
 
 **1. CLIENT OVERVIEW**
-Nama Klien: {payload.get('clientName', '')}
-Nama Bisnes: {payload.get('businessName', '')}
-Tarikh Sesi: {payload.get('date', '')}
-Jualan 2025: {payload.get('sales2025', '')}
-Jualan Semasa 2026: {payload.get('sales2026', '')}
-Target Jualan 2026: {payload.get('target2026', '')}
+Nama Klien: {g('clientName')}
+Nama Bisnes: {g('businessName')}
+Tarikh Sesi: {g('date')}
+Jualan 2025: {g('sales2025')}
+Jualan Semasa 2026: {g('sales2026')}
+Target Jualan 2026: {g('target2026')}
 
 ---
 
 **2. CURRENT STATE**
-{payload.get('currentState', '')}
+{g('currentState')}
 
 ---
 
 **3. CHALLENGES / PAIN POINTS**
-{payload.get('challenges', '')}
+{g('challenges')}
 
 ---
 
 **4. ROOT CAUSE**
-{payload.get('rootCause', '')}
+{g('rootCause')}
 
 ---
 
 **5. GUIDANCE / STRATEGY**
-{payload.get('guidance', '')}
+{g('guidance')}
 
 ---
 
@@ -260,12 +312,12 @@ Target Jualan 2026: {payload.get('target2026', '')}
 ---
 
 **7. CAM FOLLOW-UP REMARK**
-{payload.get('followUp', '')}
+{g('followUp')}
 
 ---
 
 **8. AI INSIGHTS & SUGGESTIONS**
-{payload.get('suggestions', '')}"""
+{g('suggestions')}"""
 
     # Step 5: Send to Make webhook
     webhook_url = os.environ.get("COACHING_WEBHOOK_URL")
@@ -292,9 +344,9 @@ Target Jualan 2026: {payload.get('target2026', '')}
 def _format_actions(payload: dict) -> str:
     lines = []
     for i in range(1, 6):
-        action = payload.get(f"action{i}", "")
-        task = payload.get(f"task{i}", "")
-        deadline = payload.get(f"deadline{i}", "")
+        action = _clean(payload.get(f"action{i}", "") or "")
+        task = _clean(payload.get(f"task{i}", "") or "")
+        deadline = _clean(payload.get(f"deadline{i}", "") or "")
         if action:
             line = f"**{action}**"
             if task:
