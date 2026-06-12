@@ -35,7 +35,7 @@ def is_allowed(chat_id: int) -> bool:
         except Exception as e:
             logger_tmp = logging.getLogger(__name__)
             logger_tmp.error("Failed to fetch allowed_chats: %s", e)
-            return True  # fail open if Supabase unreachable
+            return chat_id in _allowed_cache  # fail closed — use last known cache
     result = not _allowed_cache or chat_id in _allowed_cache
     logging.getLogger(__name__).info("is_allowed: chat_id=%s cache=%s result=%s", chat_id, _allowed_cache, result)
     return result
@@ -90,17 +90,26 @@ def _balance_html_tags(text: str) -> str:
 
 
 def _split_html(text: str, max_len: int = 4096) -> list:
-    """Split HTML into chunks without cutting inside tags."""
+    """Split HTML into Telegram-safe chunks at natural boundaries."""
     chunks = []
     while len(text) > max_len:
-        split_at = max_len
-        # Walk back to avoid splitting inside a tag
-        last_open = text.rfind('<', 0, split_at)
-        last_close = text.rfind('>', 0, split_at)
-        if last_open > last_close:
-            split_at = last_open
+        # Prefer splitting at a section/paragraph boundary
+        split_at = -1
+        for sep in ['\n\n---\n\n', '\n\n', '\n']:
+            pos = text.rfind(sep, 0, max_len)
+            if pos > max_len // 3:
+                split_at = pos + len(sep)
+                break
+        if split_at == -1:
+            # Last resort: walk back to avoid cutting inside a tag
+            split_at = max_len
+            last_open = text.rfind('<', 0, split_at)
+            last_close = text.rfind('>', 0, split_at)
+            if last_open > last_close:
+                split_at = last_open
         chunks.append(_balance_html_tags(text[:split_at]))
-        text = text[split_at:]
+        # Strip orphaned closing tags at the start of the remainder
+        text = re.sub(r'^(\s*</(b|i|code)>\s*)+', '', text[split_at:])
     if text:
         chunks.append(_balance_html_tags(text))
     return chunks
@@ -276,9 +285,8 @@ async def _run_dailyreport(update: Update, target_date: str) -> int:
     try:
         chat_id = update.message.chat_id
         thread_id = update.message.message_thread_id
-        loop = asyncio.get_event_loop()
-        content, count = await loop.run_in_executor(
-            None, report.generate_daily_report, target_date, chat_id, thread_id
+        content, count = await asyncio.to_thread(
+            report.generate_daily_report, target_date, chat_id, thread_id
         )
         if count == 0:
             await update.message.reply_text(content)
@@ -419,13 +427,15 @@ _IDENTIFICATION_TOOLS = [
         "type": "function",
         "function": {
             "name": "confirm_and_process",
-            "description": "Call this once you have identified the correct client and the user has confirmed. Triggers transcript processing.",
+            "description": "Call this once you have identified the correct client(s) and the user has confirmed. Supports one or two clients for joint sessions under the same company.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "member_id": {"type": "string", "description": "The member_id of the confirmed client record"},
-                    "client_name": {"type": "string", "description": "Full name of the confirmed client"},
+                    "member_id": {"type": "string", "description": "The member_id of the first confirmed client"},
+                    "client_name": {"type": "string", "description": "Full name of the first confirmed client"},
                     "business_name": {"type": "string", "description": "Business/company name"},
+                    "member_id_2": {"type": "string", "description": "The member_id of the second client (joint session only)"},
+                    "client_name_2": {"type": "string", "description": "Full name of the second client (joint session only)"},
                 },
                 "required": ["client_name", "business_name"],
             },
@@ -433,16 +443,17 @@ _IDENTIFICATION_TOOLS = [
     },
 ]
 
-_IDENTIFICATION_SYSTEM = """You are an assistant helping identify a coaching session client from a transcript.
+_IDENTIFICATION_SYSTEM = """You are an assistant helping identify coaching session client(s) from a transcript.
 
 Your job:
-1. Read the transcript excerpt and try to identify the client's name and company.
-2. Search using search_clients. If it returns no results, fall back to semantic_search with the name or company — it handles fuzzy/misspelled names.
-3. Tell the user what you found — show their name, company, and member ID — and ask them to confirm.
-4. If multiple matches, present them clearly and ask which one.
-5. Once the user confirms, call confirm_and_process immediately.
+1. Read the transcript excerpt and try to identify the client name(s) and company.
+2. If TWO clients appear in the session (joint session, same company), identify both.
+3. Search using search_clients for each client. If no results, fall back to semantic_search.
+4. Tell the user what you found — show name, company, and member ID — and ask them to confirm.
+5. If multiple matches, present them clearly and ask which one.
+6. Once the user confirms, call confirm_and_process immediately. For joint sessions, include both client_name and client_name_2.
 
-If the transcript has no client info, ask the user who the session is for, then search using both tools if needed.
+If the transcript has no client info, ask the user who the session is for.
 
 Be concise and conversational. Don't ask unnecessary questions."""
 
@@ -546,7 +557,8 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
 
         if not tool_calls:
             # Plain text reply — send to user and wait for their response
-            await update.message.reply_text(msg.content or "...")
+            for chunk in _split_html(md_to_html(msg.content or "...")):
+                await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
             return AI_CONVERSATION
 
         # Process tool calls
@@ -573,17 +585,20 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
                 client_name = args["client_name"]
                 business_name = args["business_name"]
                 client_record = search_cache.get(member_id, {})
+                member_id_2 = args.get("member_id_2", "")
+                client_name_2 = args.get("client_name_2")
+                client_record_2 = search_cache.get(member_id_2, {}) if member_id_2 else {}
 
-                await update.message.reply_text(f"Got it! Processing summary for {client_name} ({business_name})...")
+                label = f"{client_name} & {client_name_2}" if client_name_2 else client_name
+                await update.message.reply_text(f"Got it! Processing summary for {label} ({business_name})...")
                 await update.message.chat.send_action(ChatAction.TYPING)
                 try:
-                    loop = asyncio.get_event_loop()
-                    markdown, _ = await loop.run_in_executor(
-                        None, coaching.process_transcript, transcript, update.message.chat_id, client_name, business_name, client_record, update.message.message_thread_id
+                    markdown, _ = await asyncio.to_thread(
+                        coaching.process_transcript, transcript, update.message.chat_id, client_name, business_name, client_record, update.message.message_thread_id, client_name_2, client_record_2
                     )
                     formatted = md_to_html(markdown)
-                    for i in range(0, len(formatted), 4096):
-                        await update.message.reply_text(formatted[i:i + 4096], parse_mode=ParseMode.HTML)
+                    for chunk in _split_html(formatted):
+                        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
                     await update.message.reply_text("Summary has been sent to Make successfully.")
                 except Exception as e:
                     logger.error("Coaching transcript error: %s", e, exc_info=True)
