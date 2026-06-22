@@ -5,10 +5,10 @@ import re
 import httpx
 from html import escape
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ChatAction, ParseMode
 from telegram import BotCommand
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 
 load_dotenv()
 
@@ -16,6 +16,7 @@ import agent
 import coaching
 import database
 import database as db
+import payment
 import report
 
 # Allowlist cache: {chat_id: bool}, refreshed every 5 minutes
@@ -189,6 +190,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📝 *Coaching Summary*\n"
         "• /oneonone — upload a transcript to generate a 1-on-1 session summary\n"
         "• /dailyreport [YYYY-MM-DD] — generate executive summary of coaching sessions (defaults to today)\n\n"
+        "💳 *Payments*\n"
+        "• /payment — upload a receipt to extract and submit payment details to Google Sheet\n\n"
         "🛠 *Other Commands*\n"
         "• /clear — clear conversation history\n"
         "• /updatedatabase — sync the database\n\n"
@@ -393,6 +396,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 AI_CONVERSATION, ASK_TRANSCRIPT = range(2)
+PAYMENT_RECEIPT, PAYMENT_REMARK, PAYMENT_CONFIRM, PAYMENT_EDIT, PAYMENT_EDIT_VALUE = 200, 201, 202, 203, 204
 
 _IDENTIFICATION_TOOLS = [
     {
@@ -619,6 +623,263 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
 
 
 
+async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update.message.chat_id):
+        await update.message.reply_text("You do not have access to this bot.")
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "Please upload the payment receipt (image or PDF).",
+    )
+    return PAYMENT_RECEIPT
+
+
+async def payment_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    import io
+    msg = update.message
+
+    image_bytes = None
+    mime_type = None
+    filename = "receipt.jpg"
+    raw_for_pdf = None
+
+    # Photo sent as compressed image
+    if msg.photo:
+        photo = msg.photo[-1]
+        tg_file = await context.bot.get_file(photo.file_id)
+        image_bytes = bytes(await tg_file.download_as_bytearray())
+        mime_type = "image/jpeg"
+        filename = "receipt.jpg"
+
+    # Document (PDF or image sent as file)
+    elif msg.document:
+        doc = msg.document
+        fname = (doc.file_name or "receipt")
+        mt = doc.mime_type or ""
+        tg_file = await context.bot.get_file(doc.file_id)
+        raw = bytes(await tg_file.download_as_bytearray())
+
+        if mt.startswith("image/") or fname.lower().endswith((".jpg", ".jpeg", ".png")):
+            image_bytes = raw
+            mime_type = mt if mt.startswith("image/") else "image/jpeg"
+            filename = fname
+        elif fname.lower().endswith(".pdf") or mt == "application/pdf":
+            raw_for_pdf = raw
+            mime_type = "application/pdf"
+            filename = fname
+        else:
+            await msg.reply_text("Please send an image (JPG/PNG) or PDF receipt.")
+            return PAYMENT_RECEIPT
+    else:
+        await msg.reply_text("Please send an image (JPG/PNG) or PDF receipt.")
+        return PAYMENT_RECEIPT
+
+    await msg.chat.send_action(ChatAction.TYPING)
+
+    # Upload to Supabase Storage for a permanent public link
+    try:
+        file_url = await asyncio.to_thread(
+            payment.upload_receipt,
+            image_bytes if image_bytes else raw_for_pdf,
+            filename,
+            mime_type,
+        )
+    except Exception as e:
+        logger.error("Receipt upload error: %s", e, exc_info=True)
+        file_url = ""
+
+    # Extract payment data
+    try:
+        if raw_for_pdf:
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(raw_for_pdf)) as pdf:
+                text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            extracted = await asyncio.to_thread(payment.extract_from_text, text)
+        else:
+            extracted = await asyncio.to_thread(payment.extract_from_image, image_bytes, mime_type)
+    except Exception as e:
+        logger.error("Payment extraction error: %s", e, exc_info=True)
+        await msg.reply_text("Failed to read the receipt. Please try again.")
+        return PAYMENT_RECEIPT
+
+    return await _show_payment_summary(update, context, extracted, file_url)
+
+
+async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, extracted: dict, file_url: str) -> int:
+    client_name = extracted.get("clientName", "")
+    company_name = extracted.get("companyName", "")
+
+    crm = await asyncio.to_thread(payment.lookup_client, client_name, company_name)
+    crm_name = crm.get("name", "") if crm else ""
+    crm_company = (crm.get("company_details") or {}).get("company_name", "") if crm else ""
+    crm_cam = crm.get("cam", "") if crm else ""
+    crm_member_id = crm.get("member_id", "") if crm else ""
+    crm_found = "✅ found in CRM" if crm else "⚠️ not found in CRM"
+
+    amount = extracted.get("installmentAmount", "")
+    try:
+        amount_display = f"RM {float(amount):,.2f}" if amount else "—"
+    except (ValueError, TypeError):
+        amount_display = f"RM {amount}"
+
+    context.user_data["payment"] = {
+        "memberId": crm_member_id,
+        "clientName": crm_name or client_name,
+        "companyName": crm_company or company_name,
+        "installmentAmount": amount,
+        "attachmentLink": file_url,
+        "installmentMonth": extracted.get("installmentMonth", ""),
+        "cam": crm_cam,
+        "reference": extracted.get("reference", ""),
+        "remark": "",
+    }
+
+    await update.message.reply_text(
+        _payment_summary_text(context.user_data["payment"]),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_confirm_keyboard(),
+    )
+    return PAYMENT_CONFIRM
+
+
+_PAYMENT_FIELDS = [
+    ("memberId",          "Member ID"),
+    ("clientName",        "Client Name"),
+    ("companyName",       "Company Name"),
+    ("installmentAmount", "Amount (RM)"),
+    ("installmentMonth",  "Month"),
+    ("reference",         "Reference"),
+    ("cam",               "CAM"),
+    ("remark",            "Remark"),
+]
+
+
+def _payment_summary_text(p: dict) -> str:
+    amount = p.get("installmentAmount", "")
+    try:
+        amount_display = f"RM {float(amount):,.2f}" if amount else "—"
+    except (ValueError, TypeError):
+        amount_display = f"RM {amount}"
+    return (
+        f"📋 <b>Payment Details</b>\n\n"
+        f"🪪 Member ID: {p.get('memberId') or '—'}\n"
+        f"👤 Client: {p.get('clientName') or '—'}\n"
+        f"🏢 Company: {p.get('companyName') or '—'}\n"
+        f"💰 Amount: {amount_display}\n"
+        f"📅 Month: {p.get('installmentMonth') or '—'}\n"
+        f"🔖 Reference: {p.get('reference') or '—'}\n"
+        f"👨‍💼 CAM: {p.get('cam') or '—'}\n"
+        f"📝 Remark: {p.get('remark') or '—'}\n\n"
+        f"⚠️ <i>Please make sure all details are correct before submitting.</i>"
+    )
+
+
+def _confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Confirm", callback_data="pay_confirm"),
+        InlineKeyboardButton("✏️ Edit", callback_data="pay_edit"),
+        InlineKeyboardButton("❌ Cancel", callback_data="pay_cancel"),
+    ]])
+
+
+def _edit_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    row = []
+    for i, (_, label) in enumerate(_PAYMENT_FIELDS):
+        row.append(InlineKeyboardButton(label, callback_data=f"pay_field_{i}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("← Back", callback_data="pay_back")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def payment_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles ✅ Confirm / ✏️ Edit / ❌ Cancel button presses."""
+    query = update.callback_query
+
+    if query.data == "pay_cancel":
+        await query.answer()
+        context.user_data.pop("payment", None)
+        await query.edit_message_text("Payment update cancelled.")
+        return ConversationHandler.END
+
+    if query.data == "pay_edit":
+        await query.answer()
+        await query.edit_message_text("Which field would you like to edit?", reply_markup=_edit_keyboard())
+        return PAYMENT_EDIT
+
+    # pay_confirm — validate required fields
+    p = context.user_data.get("payment", {})
+    if not p.get("clientName", "").strip():
+        await query.answer("Client Name is required before submitting.", show_alert=True)
+        return PAYMENT_CONFIRM
+
+    await query.answer()
+
+    payload = context.user_data.pop("payment", {})
+    payload["telegramChatId"] = str(query.message.chat_id)
+    payload["telegramThreadId"] = str(query.message.message_thread_id or "")
+    try:
+        await asyncio.to_thread(payment.send_to_make, payload)
+        await query.edit_message_text("✅ Payment record submitted to Google Sheet successfully.")
+    except Exception as e:
+        logger.error("Payment webhook error: %s", e, exc_info=True)
+        await query.edit_message_text("Failed to submit. Please try again.")
+    return ConversationHandler.END
+
+
+async def payment_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles field selection buttons and the Back button."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "pay_back":
+        await query.edit_message_text(
+            _payment_summary_text(context.user_data["payment"]),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_confirm_keyboard(),
+        )
+        return PAYMENT_CONFIRM
+
+    idx = int(query.data.split("_")[-1])
+    _, label = _PAYMENT_FIELDS[idx]
+    context.user_data["payment"]["_editing_field"] = idx
+    await query.edit_message_text(f"Enter new value for <b>{label}</b>:", parse_mode=ParseMode.HTML)
+    return PAYMENT_EDIT_VALUE
+
+
+async def payment_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives the typed new value, updates the field, then re-runs CRM lookup to fill empty fields."""
+    idx = context.user_data["payment"].pop("_editing_field", None)
+    if idx is None:
+        return PAYMENT_CONFIRM
+    key, _ = _PAYMENT_FIELDS[idx]
+    p = context.user_data["payment"]
+    p[key] = update.message.text.strip()
+
+    # Re-run CRM lookup when client name or company name is edited, fill only empty fields
+    if key in ("clientName", "companyName"):
+        await update.message.chat.send_action(ChatAction.TYPING)
+        crm = await asyncio.to_thread(payment.lookup_client, p.get("clientName", ""), p.get("companyName", ""))
+        if crm:
+            crm_company = (crm.get("company_details") or {}).get("company_name", "")
+            if not p.get("memberId"):
+                p["memberId"] = crm.get("member_id", "")
+            if not p.get("companyName"):
+                p["companyName"] = crm_company
+            if not p.get("cam"):
+                p["cam"] = crm.get("cam", "")
+
+    await update.message.reply_text(
+        _payment_summary_text(p),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_confirm_keyboard(),
+    )
+    return PAYMENT_CONFIRM
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Update caused error: %s", context.error, exc_info=True)
 
@@ -633,6 +894,7 @@ def main() -> None:
             BotCommand("topsales", "View top performing companies by sales"),
             BotCommand("updatedatabase", "Sync and update the database"),
             BotCommand("dailyreport", "Generate coaching report. Usage: /dailyreport or /dailyreport YYYY-MM-DD"),
+            BotCommand("payment", "Submit a payment receipt to Google Sheet"),
             BotCommand("clear", "Clear conversation history"),
         ])
 
@@ -664,7 +926,19 @@ def main() -> None:
         fallbacks=[CommandHandler("dailyreport", dailyreport)],
         per_chat=True,
     )
+    payment_conv = ConversationHandler(
+        entry_points=[CommandHandler("payment", payment_command)],
+        states={
+            PAYMENT_RECEIPT: [MessageHandler(filters.PHOTO | filters.Document.ALL, payment_receipt)],
+            PAYMENT_CONFIRM: [CallbackQueryHandler(payment_confirm, pattern="^pay_(confirm|edit|cancel)$")],
+            PAYMENT_EDIT: [CallbackQueryHandler(payment_edit, pattern="^pay_(field_\\d+|back)$")],
+            PAYMENT_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_edit_value)],
+        },
+        fallbacks=[CommandHandler("payment", payment_command)],
+        per_chat=True,
+    )
     app.add_handler(dailyreport_conv)
+    app.add_handler(payment_conv)
     app.add_handler(coaching_conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
