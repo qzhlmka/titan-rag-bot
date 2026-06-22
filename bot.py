@@ -178,7 +178,7 @@ async def _send_draft(token: str, chat_id: int, draft_id: int, text: str = "") -
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 Hello! I'm the Titan Database assistant.\n\n"
-        "Here's what I can help you with:\n\n"
+        "Tap /menu to see all actions as buttons, or use commands directly:\n\n"
         "🔍 *Client & Company Lookup*\n"
         "• Who are the clients from Iyziq?\n"
         "• Show me health & wellness companies in KL\n"
@@ -795,6 +795,44 @@ def _edit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def _notify_payment(context: ContextTypes.DEFAULT_TYPE, payload: dict) -> None:
+    """Send a payment notification to the configured group/topic."""
+    notify_chat = os.environ.get("PAYMENT_NOTIFY_CHAT_ID")
+    if not notify_chat:
+        return
+    notify_thread = os.environ.get("PAYMENT_NOTIFY_THREAD_ID")
+    amount = payload.get("installmentAmount", "")
+    month = payload.get("installmentMonth", "")
+    client = payload.get("clientName", "")
+    company = payload.get("companyName", "")
+    cam = payload.get("cam", "")
+    member_id = payload.get("memberId", "")
+    reference = payload.get("reference", "")
+    attachment = payload.get("attachmentLink", "")
+
+    lines = [
+        "💳 <b>New Payment Submitted</b>",
+        "",
+        f"👤 <b>Client:</b> {client}" + (f" ({company})" if company else ""),
+        f"🆔 <b>Member ID:</b> {member_id or '—'}",
+        f"💰 <b>Amount:</b> RM {amount}",
+        f"📅 <b>Month:</b> {month}",
+        f"👨‍💼 <b>CAM:</b> {cam or '—'}",
+        f"🔖 <b>Reference:</b> {reference or '—'}",
+    ]
+    if attachment:
+        lines.append(f'🧾 <a href="{attachment}">View Receipt</a>')
+
+    text = "\n".join(lines)
+    kwargs = dict(chat_id=notify_chat, text=text, parse_mode=ParseMode.HTML)
+    if notify_thread:
+        kwargs["message_thread_id"] = int(notify_thread)
+    try:
+        await context.bot.send_message(**kwargs)
+    except Exception as e:
+        logger.error("Payment notification error: %s", e, exc_info=True)
+
+
 async def payment_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles ✅ Confirm / ✏️ Edit / ❌ Cancel button presses."""
     query = update.callback_query
@@ -824,6 +862,7 @@ async def payment_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         await asyncio.to_thread(payment.send_to_make, payload)
         await query.edit_message_text("✅ Payment record submitted to Google Sheet successfully.")
+        await _notify_payment(context, payload)
     except Exception as e:
         logger.error("Payment webhook error: %s", e, exc_info=True)
         await query.edit_message_text("Failed to submit. Please try again.")
@@ -880,6 +919,115 @@ async def payment_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return PAYMENT_CONFIRM
 
 
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📝 1-on-1 Coaching", callback_data="menu_oneonone"),
+            InlineKeyboardButton("💳 Payment Receipt", callback_data="menu_payment"),
+        ],
+        [
+            InlineKeyboardButton("📊 Daily Report", callback_data="menu_dailyreport"),
+            InlineKeyboardButton("🏆 Top 100 Sales", callback_data="menu_topsales"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Update Database", callback_data="menu_updatedatabase"),
+            InlineKeyboardButton("🗑 Clear History", callback_data="menu_clear"),
+        ],
+    ])
+    await update.message.reply_text("What would you like to do?", reply_markup=kb)
+
+
+async def _coaching_menu_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    msg = query.message
+    if not is_allowed(msg.chat_id):
+        await msg.reply_text("You do not have access to this bot.")
+        return ConversationHandler.END
+    await msg.reply_text("Please send the transcript file (.txt, .docx, or .pdf) or paste the transcript text.")
+    return ASK_TRANSCRIPT
+
+
+async def _dailyreport_menu_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    msg = query.message
+    if not is_allowed(msg.chat_id):
+        await msg.reply_text("You do not have access to this bot.")
+        return ConversationHandler.END
+    await msg.reply_text(
+        "Which date would you like the report for?\nReply with a date (YYYY-MM-DD) or type *today*.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return DAILYREPORT_DATE
+
+
+async def _payment_menu_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    msg = query.message
+    if not is_allowed(msg.chat_id):
+        await msg.reply_text("You do not have access to this bot.")
+        return ConversationHandler.END
+    await msg.reply_text("Please upload the payment receipt (image or PDF).")
+    return PAYMENT_RECEIPT
+
+
+async def _menu_simple_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles topsales / updatedatabase / clear tapped from the menu."""
+    query = update.callback_query
+    await query.answer()
+    msg = query.message
+
+    if query.data == "menu_clear":
+        _histories.pop(msg.chat_id, None)
+        await msg.reply_text("Conversation cleared.")
+        return
+
+    if not is_allowed(msg.chat_id):
+        await msg.reply_text("You do not have access to this bot.")
+        return
+
+    if query.data == "menu_topsales":
+        script_url = os.environ.get("TOP100_SLIDES_URL")
+        if not script_url:
+            await msg.reply_text("Top 100 slides is not configured.")
+            return
+        await msg.reply_text("Generating Top 100 Sales slides, please wait. The slides will be sent here when ready...")
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                params = {"chat_id": msg.chat_id}
+                if msg.message_thread_id:
+                    params["thread_id"] = msg.message_thread_id
+                resp = await client.get(script_url, params=params, follow_redirects=True)
+                data = resp.json()
+                if data.get("error"):
+                    logger.error("Apps Script error: %s", data["error"])
+                    await msg.reply_text(f"Script error: {data['error']}")
+        except httpx.TimeoutException:
+            pass
+        except Exception as e:
+            logger.error("topsales error: %s", e, exc_info=True)
+            await msg.reply_text("Failed to reach the script. Please try again.")
+
+    elif query.data == "menu_updatedatabase":
+        webhook_url = os.environ.get("N8N_WEBHOOK_URL")
+        if not webhook_url:
+            await msg.reply_text("Database update is not configured.")
+            return
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(webhook_url, json={"chat_id": msg.chat_id})
+            if resp.status_code in (200, 202):
+                await msg.reply_text("Database update started. This usually takes around 7 minutes.")
+            else:
+                logger.error("n8n returned status %s: %s", resp.status_code, resp.text)
+                await msg.reply_text(f"Failed to start update (status {resp.status_code}). Please check n8n.")
+        except Exception as e:
+            logger.error("n8n webhook error: %s", e, exc_info=True)
+            await msg.reply_text("Failed to reach n8n. Please try again.")
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Update caused error: %s", context.error, exc_info=True)
 
@@ -889,6 +1037,7 @@ def main() -> None:
 
     async def post_init(application: Application) -> None:
         await application.bot.set_my_commands([
+            BotCommand("menu", "Show all available actions"),
             BotCommand("start", "Start the bot"),
             BotCommand("oneonone", "Generate a 1-on-1 coaching session summary"),
             BotCommand("topsales", "View top performing companies by sales"),
@@ -903,6 +1052,7 @@ def main() -> None:
     coaching_conv = ConversationHandler(
         entry_points=[
             CommandHandler("oneonone", coaching_command),
+            CallbackQueryHandler(_coaching_menu_entry, pattern="^menu_oneonone$"),
         ],
         states={
             ASK_TRANSCRIPT: [
@@ -916,18 +1066,21 @@ def main() -> None:
         per_chat=True,
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("clear", clear))
-    app.add_handler(CommandHandler("updatedatabase", updatedatabase))
-    app.add_handler(CommandHandler("topsales", topsales))
     dailyreport_conv = ConversationHandler(
-        entry_points=[CommandHandler("dailyreport", dailyreport)],
+        entry_points=[
+            CommandHandler("dailyreport", dailyreport),
+            CallbackQueryHandler(_dailyreport_menu_entry, pattern="^menu_dailyreport$"),
+        ],
         states={DAILYREPORT_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, dailyreport_date)]},
         fallbacks=[CommandHandler("dailyreport", dailyreport)],
         per_chat=True,
     )
+
     payment_conv = ConversationHandler(
-        entry_points=[CommandHandler("payment", payment_command)],
+        entry_points=[
+            CommandHandler("payment", payment_command),
+            CallbackQueryHandler(_payment_menu_entry, pattern="^menu_payment$"),
+        ],
         states={
             PAYMENT_RECEIPT: [MessageHandler(filters.PHOTO | filters.Document.ALL, payment_receipt)],
             PAYMENT_CONFIRM: [CallbackQueryHandler(payment_confirm, pattern="^pay_(confirm|edit|cancel)$")],
@@ -937,6 +1090,13 @@ def main() -> None:
         fallbacks=[CommandHandler("payment", payment_command)],
         per_chat=True,
     )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CommandHandler("updatedatabase", updatedatabase))
+    app.add_handler(CommandHandler("topsales", topsales))
+    app.add_handler(CallbackQueryHandler(_menu_simple_action, pattern="^menu_(topsales|updatedatabase|clear)$"))
     app.add_handler(dailyreport_conv)
     app.add_handler(payment_conv)
     app.add_handler(coaching_conv)
