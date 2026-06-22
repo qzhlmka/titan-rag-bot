@@ -808,6 +808,7 @@ async def _notify_payment(context: ContextTypes.DEFAULT_TYPE, payload: dict) -> 
     cam = payload.get("cam", "")
     member_id = payload.get("memberId", "")
     reference = payload.get("reference", "")
+    remark = payload.get("remark", "")
     attachment = payload.get("attachmentLink", "")
 
     lines = [
@@ -820,6 +821,8 @@ async def _notify_payment(context: ContextTypes.DEFAULT_TYPE, payload: dict) -> 
         f"👨‍💼 <b>CAM:</b> {cam or '—'}",
         f"🔖 <b>Reference:</b> {reference or '—'}",
     ]
+    if remark:
+        lines.append(f"📝 <b>Remark:</b> {remark}")
     if attachment:
         lines.append(f'🧾 <a href="{attachment}">View Receipt</a>')
 
