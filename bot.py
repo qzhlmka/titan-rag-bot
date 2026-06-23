@@ -510,14 +510,48 @@ async def coaching_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def received_transcript(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    transcript = await _extract_transcript(update, context)
-    if not transcript:
-        await update.message.reply_text("Could not read the transcript. Please send a .txt, .docx, or .pdf file, or paste the text.")
+    # File uploads: process immediately (entire content arrives at once)
+    if update.message.document:
+        transcript = await _extract_transcript(update, context)
+        if not transcript:
+            await update.message.reply_text("Could not read the transcript. Please send a .txt, .docx, or .pdf file, or paste the text.")
+            return ASK_TRANSCRIPT
+        context.user_data["transcript"] = transcript
+        context.user_data["ai_messages"] = []
+        context.user_data["search_cache"] = {}
+        await update.message.chat.send_action(ChatAction.TYPING)
+        return await _run_identification_agent(update, context)
+
+    # Text paste: accumulate parts, show Process button after each
+    part = (update.message.text or "").strip()
+    if not part:
         return ASK_TRANSCRIPT
+    parts = context.user_data.setdefault("transcript_parts", [])
+    parts.append(part)
+    total_chars = sum(len(p) for p in parts)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Process Now", callback_data="transcript_process")]])
+    await update.message.reply_text(
+        f"✅ Part {len(parts)} received ({total_chars:,} characters total).\n"
+        "Paste more text or tap Process Now when finished.",
+        reply_markup=kb,
+    )
+    return ASK_TRANSCRIPT
+
+
+async def transcript_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User taps Process Now — join all accumulated parts and run the agent."""
+    query = update.callback_query
+    await query.answer()
+    parts = context.user_data.pop("transcript_parts", [])
+    if not parts:
+        await query.message.reply_text("No transcript received yet. Please paste the transcript first.")
+        return ASK_TRANSCRIPT
+    transcript = "\n\n".join(parts)
     context.user_data["transcript"] = transcript
     context.user_data["ai_messages"] = []
     context.user_data["search_cache"] = {}
-    await update.message.chat.send_action(ChatAction.TYPING)
+    await query.edit_message_text(f"Processing {len(transcript):,} characters...")
+    await query.message.chat.send_action(ChatAction.TYPING)
     return await _run_identification_agent(update, context)
 
 
@@ -532,6 +566,9 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
     """Run the AI identification loop until it sends a message or calls confirm_and_process."""
     import json as _json
     from openai import OpenAI
+
+    # Works for both regular messages and callback query updates
+    msg_obj = update.effective_message
 
     openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     transcript = context.user_data.get("transcript", "")
@@ -562,7 +599,7 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
         if not tool_calls:
             # Plain text reply — send to user and wait for their response
             for chunk in _split_html(md_to_html(msg.content or "...")):
-                await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+                await msg_obj.reply_text(chunk, parse_mode=ParseMode.HTML)
             return AI_CONVERSATION
 
         # Process tool calls
@@ -594,19 +631,19 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
                 client_record_2 = search_cache.get(member_id_2, {}) if member_id_2 else {}
 
                 label = f"{client_name} & {client_name_2}" if client_name_2 else client_name
-                await update.message.reply_text(f"Got it! Processing summary for {label} ({business_name})...")
-                await update.message.chat.send_action(ChatAction.TYPING)
+                await msg_obj.reply_text(f"Got it! Processing summary for {label} ({business_name})...")
+                await msg_obj.chat.send_action(ChatAction.TYPING)
                 try:
                     markdown, _ = await asyncio.to_thread(
-                        coaching.process_transcript, transcript, update.message.chat_id, client_name, business_name, client_record, update.message.message_thread_id, client_name_2, client_record_2
+                        coaching.process_transcript, transcript, msg_obj.chat_id, client_name, business_name, client_record, msg_obj.message_thread_id, client_name_2, client_record_2
                     )
                     formatted = md_to_html(markdown)
                     for chunk in _split_html(formatted):
-                        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
-                    await update.message.reply_text("Summary has been sent to Make successfully.")
+                        await msg_obj.reply_text(chunk, parse_mode=ParseMode.HTML)
+                    await msg_obj.reply_text("Summary has been sent to Make successfully.")
                 except Exception as e:
                     logger.error("Coaching transcript error: %s", e, exc_info=True)
-                    await update.message.reply_text("Failed to process transcript. Please try again.")
+                    await msg_obj.reply_text("Failed to process transcript. Please try again.")
 
                 context.user_data.clear()
                 confirmed = True
@@ -1076,7 +1113,9 @@ def main() -> None:
         ],
         states={
             ASK_TRANSCRIPT: [
-                MessageHandler(filters.Document.ALL | filters.TEXT & ~filters.COMMAND, received_transcript)
+                MessageHandler(filters.Document.ALL, received_transcript),
+                CallbackQueryHandler(transcript_process, pattern="^transcript_process$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, received_transcript),
             ],
             AI_CONVERSATION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ai_conversation)
