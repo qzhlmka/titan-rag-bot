@@ -7,7 +7,7 @@ from html import escape
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ChatAction, ParseMode
-from telegram import BotCommand
+from telegram import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeDefault
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 
 load_dotenv()
@@ -867,7 +867,21 @@ async def payment_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     payload["telegramThreadId"] = str(query.message.message_thread_id or "")
     try:
         await asyncio.to_thread(payment.send_to_make, payload)
-        await query.edit_message_text("✅ Payment record submitted to Google Sheet successfully.")
+        lines = [
+            "✅ <b>Payment submitted successfully!</b>",
+            "",
+            f"👤 <b>Client:</b> {payload.get('clientName', '—')}" + (f" ({payload.get('companyName')})" if payload.get('companyName') else ""),
+            f"🆔 <b>Member ID:</b> {payload.get('memberId') or '—'}",
+            f"💰 <b>Amount:</b> RM {payload.get('installmentAmount') or '—'}",
+            f"📅 <b>Month:</b> {payload.get('installmentMonth') or '—'}",
+            f"👨‍💼 <b>CAM:</b> {payload.get('cam') or '—'}",
+            f"🔖 <b>Reference:</b> {payload.get('reference') or '—'}",
+        ]
+        if payload.get("remark"):
+            lines.append(f"📝 <b>Remark:</b> {payload['remark']}")
+        if payload.get("attachmentLink"):
+            lines.append(f'🧾 <a href="{payload["attachmentLink"]}">View Receipt</a>')
+        await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML)
         await _notify_payment(context, payload)
     except Exception as e:
         logger.error("Payment webhook error: %s", e, exc_info=True)
