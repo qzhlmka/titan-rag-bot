@@ -856,6 +856,9 @@ async def payment_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not p.get("clientName", "").strip():
         await query.answer("Client Name is required before submitting.", show_alert=True)
         return PAYMENT_CONFIRM
+    if not p.get("memberId", "").strip():
+        await query.answer("Client not found in database. Please verify the client name before submitting.", show_alert=True)
+        return PAYMENT_CONFIRM
 
     await query.answer()
 
