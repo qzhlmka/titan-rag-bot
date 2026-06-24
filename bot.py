@@ -505,7 +505,14 @@ async def coaching_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not is_allowed(update.message.chat_id):
         await update.message.reply_text("You do not have access to this bot. Please contact the administrator.")
         return ConversationHandler.END
-    await update.message.reply_text("Please send the transcript file (.txt, .docx, or .pdf) or paste the transcript text.")
+    context.user_data.pop("transcript_parts", None)
+    context.user_data.pop("transcript", None)
+    context.user_data.pop("ai_messages", None)
+    context.user_data.pop("search_cache", None)
+    await update.message.reply_text(
+        "Please send the transcript file (.txt, .docx, or .pdf) or paste the transcript text.\n\n"
+        "If pasting text in multiple parts, send each part and tap ▶️ Process Now when finished."
+    )
     return ASK_TRANSCRIPT
 
 
@@ -577,7 +584,7 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
 
     system_msg = {"role": "system", "content": _IDENTIFICATION_SYSTEM + f"\n\nTranscript excerpt:\n{transcript[:2500]}"}
 
-    while True:
+    for _iteration in range(10):
         response = openai_client.chat.completions.create(
             model="gpt-5.4",
             messages=[system_msg] + messages,
@@ -641,13 +648,13 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
                     for chunk in _split_html(formatted):
                         await msg_obj.reply_text(chunk, parse_mode=ParseMode.HTML)
                     await msg_obj.reply_text("Summary has been sent to Make successfully.")
+                    context.user_data.clear()
+                    confirmed = True
+                    tool_result = "Processing triggered."
                 except Exception as e:
                     logger.error("Coaching transcript error: %s", e, exc_info=True)
                     await msg_obj.reply_text("Failed to process transcript. Please try again.")
-
-                context.user_data.clear()
-                confirmed = True
-                tool_result = "Processing triggered."
+                    tool_result = f"Error: {e}"
 
             else:
                 tool_result = "Unknown tool."
@@ -657,6 +664,12 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
         if confirmed:
             return ConversationHandler.END
         # Loop back to let the AI respond after tool results
+
+    # Exhausted iterations without confirming
+    logger.error("Identification agent hit max iterations without confirming.")
+    await msg_obj.reply_text("Could not identify the client automatically. Please try again with /oneonone.")
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 
@@ -931,9 +944,14 @@ async def payment_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     query = update.callback_query
     await query.answer()
 
+    p = context.user_data.get("payment")
+    if not p:
+        await query.edit_message_text("Session expired. Please upload the receipt again with /payment.")
+        return ConversationHandler.END
+
     if query.data == "pay_back":
         await query.edit_message_text(
-            _payment_summary_text(context.user_data["payment"]),
+            _payment_summary_text(p),
             parse_mode=ParseMode.HTML,
             reply_markup=_confirm_keyboard(),
         )
@@ -941,32 +959,36 @@ async def payment_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     idx = int(query.data.split("_")[-1])
     _, label = _PAYMENT_FIELDS[idx]
-    context.user_data["payment"]["_editing_field"] = idx
+    p["_editing_field"] = idx
     await query.edit_message_text(f"Enter new value for <b>{label}</b>:", parse_mode=ParseMode.HTML)
     return PAYMENT_EDIT_VALUE
 
 
 async def payment_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receives the typed new value, updates the field, then re-runs CRM lookup to fill empty fields."""
-    idx = context.user_data["payment"].pop("_editing_field", None)
+    p = context.user_data.get("payment")
+    if not p:
+        await update.message.reply_text("Session expired. Please upload the receipt again with /payment.")
+        return ConversationHandler.END
+    idx = p.pop("_editing_field", None)
     if idx is None:
         return PAYMENT_CONFIRM
     key, _ = _PAYMENT_FIELDS[idx]
-    p = context.user_data["payment"]
     p[key] = update.message.text.strip()
 
-    # Re-run CRM lookup when client name or company name is edited, fill only empty fields
+    # Re-run CRM lookup when client name or company name is edited, always overwrite CRM-sourced fields
     if key in ("clientName", "companyName"):
         await update.message.chat.send_action(ChatAction.TYPING)
         crm = await asyncio.to_thread(payment.lookup_client, p.get("clientName", ""), p.get("companyName", ""))
         if crm:
             crm_company = (crm.get("company_details") or {}).get("company_name", "")
-            if not p.get("memberId"):
-                p["memberId"] = crm.get("member_id", "")
-            if not p.get("companyName"):
+            p["memberId"] = crm.get("member_id", "")
+            if crm_company:
                 p["companyName"] = crm_company
-            if not p.get("cam"):
+            if crm.get("cam"):
                 p["cam"] = crm.get("cam", "")
+        else:
+            p["memberId"] = ""
 
     await update.message.reply_text(
         _payment_summary_text(p),
