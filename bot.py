@@ -771,6 +771,8 @@ async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TY
     except (ValueError, TypeError):
         amount_display = f"RM {amount}"
 
+    account_info = payment.lookup_account(extracted.get("recipientAccount", ""))
+
     context.user_data["payment"] = {
         "memberId": crm_member_id,
         "clientName": crm_name or client_name,
@@ -781,6 +783,9 @@ async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TY
         "cam": crm_cam,
         "reference": extracted.get("reference", ""),
         "remark": "",
+        "recipientAccount": extracted.get("recipientAccount", ""),
+        "bankName": account_info.get("bank", ""),
+        "accountName": account_info.get("accountName", ""),
     }
 
     await update.message.reply_text(
@@ -800,6 +805,8 @@ _PAYMENT_FIELDS = [
     ("reference",         "Reference"),
     ("cam",               "CAM"),
     ("remark",            "Remark"),
+    ("bankName",          "Bank"),
+    ("accountName",       "Account Name"),
 ]
 
 
@@ -818,7 +825,9 @@ def _payment_summary_text(p: dict) -> str:
         f"📅 Month: {p.get('installmentMonth') or '—'}\n"
         f"🔖 Reference: {p.get('reference') or '—'}\n"
         f"👨‍💼 CAM: {p.get('cam') or '—'}\n"
-        f"📝 Remark: {p.get('remark') or '—'}\n\n"
+        f"📝 Remark: {p.get('remark') or '—'}\n"
+        f"🏦 Bank: {p.get('bankName') or '—'}\n"
+        f"🏷 Account: {p.get('accountName') or '—'}\n\n"
         f"⚠️ <i>Please make sure all details are correct before submitting.</i>"
     )
 
@@ -873,6 +882,10 @@ async def _notify_payment(context: ContextTypes.DEFAULT_TYPE, payload: dict) -> 
     ]
     if remark:
         lines.append(f"📝 <b>Remark:</b> {remark}")
+    bank = payload.get("bankName", "")
+    account_name = payload.get("accountName", "")
+    if bank or account_name:
+        lines.append(f"🏦 <b>Bank:</b> {bank or '—'} – {account_name or '—'}")
     if attachment:
         lines.append(f'🧾 <a href="{attachment}">View Receipt</a>')
 
@@ -929,6 +942,8 @@ async def payment_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ]
         if payload.get("remark"):
             lines.append(f"📝 <b>Remark:</b> {payload['remark']}")
+        if payload.get("bankName") or payload.get("accountName"):
+            lines.append(f"🏦 <b>Bank:</b> {payload.get('bankName') or '—'} – {payload.get('accountName') or '—'}")
         if payload.get("attachmentLink"):
             lines.append(f'🧾 <a href="{payload["attachmentLink"]}">View Receipt</a>')
         await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML)

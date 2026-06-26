@@ -32,8 +32,23 @@ Extract the following and return a JSON object with exactly these fields:
 - installmentAmount: payment amount as a plain number only (no RM, no commas), e.g. 5000 or 2500.50
 - installmentMonth: month and year the payment covers, e.g. "June 2026". Infer from the receipt date if not stated.
 - reference: the transaction/reference ID number from the receipt (e.g. "TXN123456", "REF: 98765"). Return "" if not found.
+- recipientAccount: the RECIPIENT's bank account number (the account that received the money — belonging to RichWorks/Titan). Look for "To", "Penerima", "Recipient", or the destination account. Return digits only, no spaces or dashes. Return "" if not found.
 
 Return ONLY the JSON object. If a field is not visible, return ""."""
+
+
+def lookup_account(account_number: str) -> dict:
+    """Match a raw account number against bank_accounts.json. Returns {bank, accountName} or {}."""
+    if not account_number:
+        return {}
+    path = os.path.join(os.path.dirname(__file__), "bank_accounts.json")
+    try:
+        with open(path) as f:
+            accounts = json.load(f)
+    except Exception:
+        return {}
+    digits = "".join(c for c in account_number if c.isdigit())
+    return accounts.get(digits, {})
 
 
 def extract_from_image(image_bytes: bytes, mime_type: str) -> dict:
