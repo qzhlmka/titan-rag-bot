@@ -257,6 +257,7 @@ async def dailyreport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if not is_allowed(update.message.chat_id):
         await update.message.reply_text("You do not have access to this bot. Please contact the administrator.")
         return ConversationHandler.END
+    _cancel_other_conversations(update)
     if context.args:
         return await _run_dailyreport(update, context.args[0])
     await update.message.reply_text(
@@ -398,6 +399,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 AI_CONVERSATION, ASK_TRANSCRIPT = range(2)
 PAYMENT_RECEIPT, PAYMENT_REMARK, PAYMENT_CONFIRM, PAYMENT_EDIT, PAYMENT_EDIT_VALUE = 200, 201, 202, 203, 204
 
+# Module-level references to ConversationHandlers, populated in main().
+# Used so entry points can kill sibling conversations before starting a new one.
+_coaching_conv: "ConversationHandler | None" = None
+_payment_conv: "ConversationHandler | None" = None
+_dailyreport_conv: "ConversationHandler | None" = None
+
+
+def _cancel_other_conversations(update: Update) -> None:
+    """Force-end every active conversation for this user/chat.
+
+    Call this at the top of every command entry point so that starting
+    /payment while mid-coaching (or vice-versa) doesn't leave a zombie
+    conversation that keeps intercepting the user's next messages.
+    """
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else None
+    key = (chat_id, user_id) if user_id else (chat_id,)
+    for conv in (_coaching_conv, _payment_conv, _dailyreport_conv):
+        if conv is not None:
+            conv._conversations.pop(key, None)
+
 _IDENTIFICATION_TOOLS = [
     {
         "type": "function",
@@ -505,6 +527,7 @@ async def coaching_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not is_allowed(update.message.chat_id):
         await update.message.reply_text("You do not have access to this bot. Please contact the administrator.")
         return ConversationHandler.END
+    _cancel_other_conversations(update)
     context.user_data.pop("transcript_parts", None)
     context.user_data.pop("transcript", None)
     context.user_data.pop("ai_messages", None)
@@ -677,6 +700,8 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not is_allowed(update.message.chat_id):
         await update.message.reply_text("You do not have access to this bot.")
         return ConversationHandler.END
+    _cancel_other_conversations(update)
+    context.user_data.pop("payment", None)
     await update.message.reply_text(
         "Please upload the payment receipt (image or PDF).",
     )
@@ -1038,6 +1063,11 @@ async def _coaching_menu_entry(update: Update, context: ContextTypes.DEFAULT_TYP
     if not is_allowed(msg.chat_id):
         await msg.reply_text("You do not have access to this bot.")
         return ConversationHandler.END
+    _cancel_other_conversations(update)
+    context.user_data.pop("transcript_parts", None)
+    context.user_data.pop("transcript", None)
+    context.user_data.pop("ai_messages", None)
+    context.user_data.pop("search_cache", None)
     await msg.reply_text("Please send the transcript file (.txt, .docx, or .pdf) or paste the transcript text.")
     return ASK_TRANSCRIPT
 
@@ -1049,6 +1079,7 @@ async def _dailyreport_menu_entry(update: Update, context: ContextTypes.DEFAULT_
     if not is_allowed(msg.chat_id):
         await msg.reply_text("You do not have access to this bot.")
         return ConversationHandler.END
+    _cancel_other_conversations(update)
     await msg.reply_text(
         "Which date would you like the report for?\nReply with a date (YYYY-MM-DD) or type *today*.",
         parse_mode=ParseMode.MARKDOWN,
@@ -1063,6 +1094,8 @@ async def _payment_menu_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not is_allowed(msg.chat_id):
         await msg.reply_text("You do not have access to this bot.")
         return ConversationHandler.END
+    _cancel_other_conversations(update)
+    context.user_data.pop("payment", None)
     await msg.reply_text("Please upload the payment receipt (image or PDF).")
     return PAYMENT_RECEIPT
 
@@ -1143,7 +1176,9 @@ def main() -> None:
 
     app = Application.builder().token(token).post_init(post_init).build()
 
-    coaching_conv = ConversationHandler(
+    global _coaching_conv, _payment_conv, _dailyreport_conv
+
+    _coaching_conv = ConversationHandler(
         entry_points=[
             CommandHandler("oneonone", coaching_command),
             CallbackQueryHandler(_coaching_menu_entry, pattern="^menu_oneonone$"),
@@ -1160,9 +1195,11 @@ def main() -> None:
         },
         fallbacks=[],
         per_chat=True,
+        allow_reentry=True,
     )
+    coaching_conv = _coaching_conv
 
-    dailyreport_conv = ConversationHandler(
+    _dailyreport_conv = ConversationHandler(
         entry_points=[
             CommandHandler("dailyreport", dailyreport),
             CallbackQueryHandler(_dailyreport_menu_entry, pattern="^menu_dailyreport$"),
@@ -1170,9 +1207,11 @@ def main() -> None:
         states={DAILYREPORT_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, dailyreport_date)]},
         fallbacks=[CommandHandler("dailyreport", dailyreport)],
         per_chat=True,
+        allow_reentry=True,
     )
+    dailyreport_conv = _dailyreport_conv
 
-    payment_conv = ConversationHandler(
+    _payment_conv = ConversationHandler(
         entry_points=[
             CommandHandler("payment", payment_command),
             CallbackQueryHandler(_payment_menu_entry, pattern="^menu_payment$"),
@@ -1185,7 +1224,9 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("payment", payment_command)],
         per_chat=True,
+        allow_reentry=True,
     )
+    payment_conv = _payment_conv
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))

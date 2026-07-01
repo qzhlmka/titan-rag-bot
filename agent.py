@@ -219,21 +219,21 @@ def update_client_sales(
         member_id = results[0].get("member_id")
         name = results[0].get("name")
     elif member_id:
-        rows = db.execute_sql(
-            f"SELECT member_id, name FROM client_details WHERE member_id ILIKE '%{member_id}%' LIMIT 1"
-        )
-        if rows and isinstance(rows, list):
+        rows = db.get_client().from_("client_details").select("member_id,name") \
+            .ilike("member_id", f"%{member_id}%").limit(1).execute().data or []
+        if rows:
             member_id = rows[0].get("member_id", member_id)
             name = rows[0].get("name", name)
 
     # Fetch full year's sales for the client's company
     sales = []
-    company_rows = db.execute_sql(
-        f"SELECT cs.month, cs.amount FROM company_sales cs "
-        f"JOIN client_details cl ON cl.company_id = cs.company_id "
-        f"WHERE cl.member_id = '{member_id}' AND cs.year = {year} AND cs.type = 'actual' "
-        f"ORDER BY cs.month"
-    )
+    safe_year = int(year)
+    client_row = db.get_client().from_("client_details").select("company_id") \
+        .eq("member_id", member_id).limit(1).execute().data or []
+    company_id = client_row[0].get("company_id") if client_row else None
+    company_rows = db.get_client().from_("company_sales").select("month,amount") \
+        .eq("company_id", company_id).eq("year", safe_year).eq("type", "actual") \
+        .order("month").execute().data if company_id else []
     month_names = {
         1: "jan", 2: "feb", 3: "mar", 4: "apr", 5: "may", 6: "jun",
         7: "jul", 8: "aug", 9: "sep", 10: "oct", 11: "nov", 12: "dec"
@@ -315,6 +315,8 @@ def generate_top100_sales_slide() -> str:
     """Generate the Top 100 companies by sales slide and send it to the chat.
     Use when the user asks for the top 100 sales slide or ranking presentation."""
     result = _trigger_slide_script("TOP100_SLIDES_URL", _current_chat_id, _current_thread_id)
+    if result and result.startswith("http"):
+        return f"Top 100 Sales slide is ready! View here: {result}"
     if result == "ok":
         return "Top 100 Sales slide is being generated and will be sent here when ready."
     return result
@@ -337,6 +339,8 @@ def generate_company_sales_chart_slide(company_name: str) -> str:
     """Generate an individual sales slide WITH a chart for a specific company and send it to the chat.
     Use when the user asks for a sales slide with chart, or a sales and chart presentation for a specific company."""
     result = _trigger_slide_script("COMPANY_SALES_CHART_SLIDE_URL", _current_chat_id, _current_thread_id, {"company_name": company_name})
+    if result and result.startswith("http"):
+        return f"Sales and chart slide for {company_name} is ready! View here: {result}"
     if result == "ok":
         return f"Sales and chart slide for {company_name} is being generated and will be sent here when ready."
     return result
@@ -347,6 +351,8 @@ def generate_company_chart_slide(company_name: str) -> str:
     """Generate a chart-only slide for a specific company and send it to the chat.
     Use when the user asks for a chart slide or chart presentation for a specific company (no sales table)."""
     result = _trigger_slide_script("COMPANY_CHART_SLIDE_URL", _current_chat_id, _current_thread_id, {"company_name": company_name})
+    if result and result.startswith("http"):
+        return f"Chart slide for {company_name} is ready! View here: {result}"
     if result == "ok":
         return f"Chart slide for {company_name} is being generated and will be sent here when ready."
     return result
