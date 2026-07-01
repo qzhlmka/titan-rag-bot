@@ -99,15 +99,37 @@ def upload_receipt(file_bytes: bytes, filename: str, mime_type: str) -> str:
     return client.storage.from_(RECEIPT_BUCKET).get_public_url(path)
 
 
+def _embed(text: str) -> list[float]:
+    resp = _get_openai().embeddings.create(model="text-embedding-3-small", input=text)
+    return resp.data[0].embedding
+
+
 def lookup_client(client_name: str, company_name: str) -> dict:
-    """Search CRM for best matching client. Returns record or {}."""
+    """Search CRM for best matching client. Returns record or {}.
+
+    Strategy:
+    1. Exact/partial match via search_clients (fast, name-based)
+    2. Fallback to semantic/embedding search when step 1 finds nothing
+    """
     results = []
     if client_name:
         results = db.search_clients(name=client_name, limit=5)
     if not results and company_name:
         results = db.search_clients(company_name=company_name, limit=5)
+
+    # Semantic fallback — catches nicknames, misspellings, partial company names
+    if not results:
+        query = " ".join(filter(None, [client_name, company_name]))
+        if query.strip():
+            try:
+                embedding = _embed(query)
+                results = db.semantic_search(embedding, limit=5)
+            except Exception as e:
+                logger.warning("Semantic search fallback failed: %s", e)
+
     if not results:
         return {}
+
     if client_name:
         for r in results:
             name = r.get("name", "").lower()
