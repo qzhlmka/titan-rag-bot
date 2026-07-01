@@ -104,12 +104,40 @@ def _embed(text: str) -> list[float]:
     return resp.data[0].embedding
 
 
+def _fetch_client_by_member_id(member_id: str) -> dict:
+    """Fetch a full client record (with company_details join) by exact member_id."""
+    rows = (
+        db.get_client()
+        .from_("client_details")
+        .select("*, company_details(company_name, brand, industry, location)")
+        .eq("member_id", member_id)
+        .limit(1)
+        .execute()
+        .data or []
+    )
+    return rows[0] if rows else {}
+
+
+def _fetch_clients_by_company_id(company_id: str) -> list[dict]:
+    """Fetch client records for a given company_id (with company_details join)."""
+    return (
+        db.get_client()
+        .from_("client_details")
+        .select("*, company_details(company_name, brand, industry, location)")
+        .eq("company_id", company_id)
+        .limit(5)
+        .execute()
+        .data or []
+    )
+
+
 def lookup_client(client_name: str, company_name: str) -> dict:
     """Search CRM for best matching client. Returns record or {}.
 
     Strategy:
-    1. Exact/partial match via search_clients (fast, name-based)
-    2. Fallback to semantic/embedding search when step 1 finds nothing
+    1. Partial name match via search_clients (fast)
+    2. Semantic/embedding search — extracts member_id or company_id from
+       metadata, then fetches the full structured client record
     """
     results = []
     if client_name:
@@ -117,13 +145,29 @@ def lookup_client(client_name: str, company_name: str) -> dict:
     if not results and company_name:
         results = db.search_clients(company_name=company_name, limit=5)
 
-    # Semantic fallback — catches nicknames, misspellings, partial company names
     if not results:
         query = " ".join(filter(None, [client_name, company_name]))
         if query.strip():
             try:
                 embedding = _embed(query)
-                results = db.semantic_search(embedding, limit=5)
+                sem_hits = db.semantic_search(embedding, limit=8)
+                # sem_hits rows: {id, content, metadata, similarity}
+                # metadata: {"type": "client", "member_id": "..."} or
+                #           {"type": "company", "company_id": "..."}
+                for hit in sem_hits:
+                    meta = hit.get("metadata") or {}
+                    if meta.get("type") == "client" and meta.get("member_id"):
+                        rec = _fetch_client_by_member_id(meta["member_id"])
+                        if rec:
+                            results.append(rec)
+                if not results:
+                    for hit in sem_hits:
+                        meta = hit.get("metadata") or {}
+                        if meta.get("type") == "company" and meta.get("company_id"):
+                            recs = _fetch_clients_by_company_id(meta["company_id"])
+                            if recs:
+                                results.extend(recs)
+                                break
             except Exception as e:
                 logger.warning("Semantic search fallback failed: %s", e)
 
