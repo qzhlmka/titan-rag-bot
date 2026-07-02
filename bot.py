@@ -673,7 +673,7 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
                 }
                 await msg_obj.reply_text(
                     f"Got it — confirmed *{label}* ({business_name}).\n\n"
-                    "Please send a photo as proof of session, or type /skip to proceed without one.",
+                    "Please send a photo as proof of session to proceed.",
                     parse_mode=ParseMode.MARKDOWN,
                 )
                 confirmed = True
@@ -753,11 +753,6 @@ async def coaching_proof_photo(update: Update, context: ContextTypes.DEFAULT_TYP
         return ASK_PROOF_PHOTO
     return await _run_coaching_with_photo(update, context, proof_url)
 
-
-async def coaching_proof_photo_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User typed /skip or any text — proceed without a proof photo."""
-    await update.message.reply_text("Skipping proof photo. Generating summary...")
-    return await _run_coaching_with_photo(update, context)
 
 
 async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1258,8 +1253,6 @@ def main() -> None:
             ],
             ASK_PROOF_PHOTO: [
                 MessageHandler(filters.PHOTO | filters.Document.IMAGE, coaching_proof_photo),
-                CommandHandler("skip", coaching_proof_photo_skip),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, coaching_proof_photo_skip),
             ],
         },
         fallbacks=[],
