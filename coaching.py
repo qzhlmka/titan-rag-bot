@@ -203,6 +203,9 @@ def process_transcript(transcript: str, chat_id: int, client_name: str = None, b
         extracted = json.loads(extract.choices[0].message.content)
         session_date = extracted.get("date", "")
         _logging.getLogger(__name__).info("Date extraction — GPT fallback result: %r", session_date)
+    if not session_date:
+        session_date = _date.today().isoformat()
+        _logging.getLogger(__name__).info("Date extraction — no date found, using today: %r", session_date)
     if not client_name:
         client_name = "Unknown"
     if client_name_2:
