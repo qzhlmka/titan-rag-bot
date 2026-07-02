@@ -180,7 +180,7 @@ Rules:
 - Be detailed and elaborative. Total content approximately 4000 characters."""
 
 
-def process_transcript(transcript: str, chat_id: int, client_name: str = None, business_name: str = None, client_record: dict = None, thread_id: int = None, client_name_2: str = None, client_record_2: dict = None) -> tuple[str, dict]:
+def process_transcript(transcript: str, chat_id: int, client_name: str = None, business_name: str = None, client_record: dict = None, thread_id: int = None, client_name_2: str = None, client_record_2: dict = None, proof_photo_b64: str = None, proof_photo_mime: str = None) -> tuple[str, dict]:
     """
     Process a coaching session transcript.
     Returns (formatted_markdown, payload_dict).
@@ -272,6 +272,9 @@ Pecahan Bulanan:
     payload["telegramChatId"] = str(chat_id)
     if thread_id:
         payload["telegramThreadId"] = str(thread_id)
+    if proof_photo_b64:
+        payload["proofPhoto"] = proof_photo_b64
+        payload["proofPhotoMime"] = proof_photo_mime or "image/jpeg"
 
     # Step 4: Format markdown preview for Telegram
     def g(key): return _clean(payload.get(key, '') or '')

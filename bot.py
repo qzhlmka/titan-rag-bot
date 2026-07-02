@@ -396,7 +396,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 os.remove(file_path)
 
 
-AI_CONVERSATION, ASK_TRANSCRIPT = range(2)
+AI_CONVERSATION, ASK_TRANSCRIPT, ASK_PROOF_PHOTO = range(3)
 PAYMENT_RECEIPT, PAYMENT_REMARK, PAYMENT_CONFIRM, PAYMENT_EDIT, PAYMENT_EDIT_VALUE = 200, 201, 202, 203, 204
 
 # Module-level references to ConversationHandlers, populated in main().
@@ -661,23 +661,23 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
                 client_record_2 = search_cache.get(member_id_2, {}) if member_id_2 else {}
 
                 label = f"{client_name} & {client_name_2}" if client_name_2 else client_name
-                await msg_obj.reply_text(f"Got it! Processing summary for {label} ({business_name})...")
-                await msg_obj.chat.send_action(ChatAction.TYPING)
-                try:
-                    markdown, _ = await asyncio.to_thread(
-                        coaching.process_transcript, transcript, msg_obj.chat_id, client_name, business_name, client_record, msg_obj.message_thread_id, client_name_2, client_record_2
-                    )
-                    formatted = md_to_html(markdown)
-                    for chunk in _split_html(formatted):
-                        await msg_obj.reply_text(chunk, parse_mode=ParseMode.HTML)
-                    await msg_obj.reply_text("Summary has been sent to Make successfully.")
-                    context.user_data.clear()
-                    confirmed = True
-                    tool_result = "Processing triggered."
-                except Exception as e:
-                    logger.error("Coaching transcript error: %s", e, exc_info=True)
-                    await msg_obj.reply_text("Failed to process transcript. Please try again.")
-                    tool_result = f"Error: {e}"
+                # Store confirmed client data and ask for proof photo before processing
+                context.user_data["pending_coaching"] = {
+                    "client_name": client_name,
+                    "client_name_2": client_name_2,
+                    "business_name": business_name,
+                    "client_record": client_record,
+                    "client_record_2": client_record_2,
+                    "transcript": transcript,
+                    "label": label,
+                }
+                await msg_obj.reply_text(
+                    f"Got it — confirmed *{label}* ({business_name}).\n\n"
+                    "Please send a photo as proof of session, or type /skip to proceed without one.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                confirmed = True
+                tool_result = "Client confirmed. Waiting for proof photo."
 
             else:
                 tool_result = "Unknown tool."
@@ -685,7 +685,7 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
 
         if confirmed:
-            return ConversationHandler.END
+            return ASK_PROOF_PHOTO
         # Loop back to let the AI respond after tool results
 
     # Exhausted iterations without confirming
@@ -694,6 +694,70 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
     context.user_data.clear()
     return ConversationHandler.END
 
+
+async def _run_coaching_with_photo(update, context, proof_b64: str = None, proof_mime: str = None) -> int:
+    """Shared logic: process the pending coaching session (with optional proof photo)."""
+    pending = context.user_data.pop("pending_coaching", {})
+    if not pending:
+        await update.effective_message.reply_text("Session expired. Please start again with /oneonone.")
+        return ConversationHandler.END
+    msg_obj = update.effective_message
+    await msg_obj.chat.send_action(ChatAction.TYPING)
+    await msg_obj.reply_text(f"Processing summary for {pending['label']} ({pending['business_name']})...")
+    try:
+        markdown, _ = await asyncio.to_thread(
+            coaching.process_transcript,
+            pending["transcript"],
+            msg_obj.chat_id,
+            pending["client_name"],
+            pending["business_name"],
+            pending["client_record"],
+            msg_obj.message_thread_id,
+            pending.get("client_name_2"),
+            pending.get("client_record_2"),
+            proof_b64,
+            proof_mime,
+        )
+        formatted = md_to_html(markdown)
+        for chunk in _split_html(formatted):
+            await msg_obj.reply_text(chunk, parse_mode=ParseMode.HTML)
+        await msg_obj.reply_text("Summary has been sent to Make successfully.")
+    except Exception as e:
+        logger.error("Coaching transcript error: %s", e, exc_info=True)
+        await msg_obj.reply_text("Failed to process transcript. Please try again.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def coaching_proof_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User sent a proof-of-session photo — encode it and process the coaching summary."""
+    import base64
+    msg = update.message
+    try:
+        if msg.photo:
+            tg_file = await context.bot.get_file(msg.photo[-1].file_id)
+            raw = bytes(await tg_file.download_as_bytearray())
+            mime = "image/jpeg"
+        elif msg.document and (msg.document.mime_type or "").startswith("image/"):
+            tg_file = await context.bot.get_file(msg.document.file_id)
+            raw = bytes(await tg_file.download_as_bytearray())
+            mime = msg.document.mime_type
+        else:
+            await msg.reply_text("Please send a photo or image file, or type /skip to proceed without one.")
+            return ASK_PROOF_PHOTO
+        proof_b64 = base64.b64encode(raw).decode("utf-8")
+        await msg.reply_text("Photo received. Generating summary...")
+    except Exception as e:
+        logger.error("Proof photo download error: %s", e, exc_info=True)
+        await msg.reply_text("Could not read the photo. Please try again or type /skip.")
+        return ASK_PROOF_PHOTO
+    return await _run_coaching_with_photo(update, context, proof_b64, mime)
+
+
+async def coaching_proof_photo_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User typed /skip or any text — proceed without a proof photo."""
+    await update.message.reply_text("Skipping proof photo. Generating summary...")
+    return await _run_coaching_with_photo(update, context)
 
 
 async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1191,6 +1255,11 @@ def main() -> None:
             ],
             AI_CONVERSATION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ai_conversation)
+            ],
+            ASK_PROOF_PHOTO: [
+                MessageHandler(filters.PHOTO | filters.Document.IMAGES, coaching_proof_photo),
+                CommandHandler("skip", coaching_proof_photo_skip),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, coaching_proof_photo_skip),
             ],
         },
         fallbacks=[],
