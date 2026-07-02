@@ -695,8 +695,8 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
     return ConversationHandler.END
 
 
-async def _run_coaching_with_photo(update, context, proof_b64: str = None, proof_mime: str = None) -> int:
-    """Shared logic: process the pending coaching session (with optional proof photo)."""
+async def _run_coaching_with_photo(update, context, proof_photo_url: str = None) -> int:
+    """Shared logic: process the pending coaching session (with optional proof photo URL)."""
     pending = context.user_data.pop("pending_coaching", {})
     if not pending:
         await update.effective_message.reply_text("Session expired. Please start again with /oneonone.")
@@ -715,8 +715,7 @@ async def _run_coaching_with_photo(update, context, proof_b64: str = None, proof
             msg_obj.message_thread_id,
             pending.get("client_name_2"),
             pending.get("client_record_2"),
-            proof_b64,
-            proof_mime,
+            proof_photo_url,
         )
         formatted = md_to_html(markdown)
         for chunk in _split_html(formatted):
@@ -730,28 +729,29 @@ async def _run_coaching_with_photo(update, context, proof_b64: str = None, proof
 
 
 async def coaching_proof_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User sent a proof-of-session photo — encode it and process the coaching summary."""
-    import base64
+    """User sent a proof-of-session photo — upload to Supabase and pass the public URL to Make."""
     msg = update.message
     try:
         if msg.photo:
             tg_file = await context.bot.get_file(msg.photo[-1].file_id)
             raw = bytes(await tg_file.download_as_bytearray())
             mime = "image/jpeg"
+            filename = "proof.jpg"
         elif msg.document and (msg.document.mime_type or "").startswith("image/"):
             tg_file = await context.bot.get_file(msg.document.file_id)
             raw = bytes(await tg_file.download_as_bytearray())
             mime = msg.document.mime_type
+            filename = msg.document.file_name or "proof.jpg"
         else:
             await msg.reply_text("Please send a photo or image file, or type /skip to proceed without one.")
             return ASK_PROOF_PHOTO
-        proof_b64 = base64.b64encode(raw).decode("utf-8")
+        proof_url = await asyncio.to_thread(payment.upload_receipt, raw, filename, mime)
         await msg.reply_text("Photo received. Generating summary...")
     except Exception as e:
-        logger.error("Proof photo download error: %s", e, exc_info=True)
-        await msg.reply_text("Could not read the photo. Please try again or type /skip.")
+        logger.error("Proof photo upload error: %s", e, exc_info=True)
+        await msg.reply_text("Could not upload the photo. Please try again or type /skip.")
         return ASK_PROOF_PHOTO
-    return await _run_coaching_with_photo(update, context, proof_b64, mime)
+    return await _run_coaching_with_photo(update, context, proof_url)
 
 
 async def coaching_proof_photo_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
