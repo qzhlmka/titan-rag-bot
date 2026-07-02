@@ -1257,7 +1257,7 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ai_conversation)
             ],
             ASK_PROOF_PHOTO: [
-                MessageHandler(filters.PHOTO | filters.Document.IMAGES, coaching_proof_photo),
+                MessageHandler(filters.PHOTO | filters.Document.IMAGE, coaching_proof_photo),
                 CommandHandler("skip", coaching_proof_photo_skip),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, coaching_proof_photo_skip),
             ],
