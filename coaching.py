@@ -180,32 +180,33 @@ Rules:
 - Be detailed and elaborative. Total content approximately 4000 characters."""
 
 
-def process_transcript(transcript: str, chat_id: int, client_name: str = None, business_name: str = None, client_record: dict = None, thread_id: int = None, client_name_2: str = None, client_record_2: dict = None, proof_photo_url: str = None) -> tuple[str, dict]:
+def process_transcript(transcript: str, chat_id: int, client_name: str = None, business_name: str = None, client_record: dict = None, thread_id: int = None, client_name_2: str = None, client_record_2: dict = None, proof_photo_url: str = None, confirmed_date: str = None) -> tuple[str, dict]:
     """
     Process a coaching session transcript.
     Returns (formatted_markdown, payload_dict).
     """
     client = _get_openai()
 
-    # Step 1: Extract date — regex first, GPT fallback
+    # Step 1: Use user-confirmed date (already validated), skip re-extraction
     import logging as _logging
-    session_date = _parse_date_from_text(transcript)
-    _logging.getLogger(__name__).info("Date extraction — regex result: %r | transcript[:100]: %r", session_date, transcript[:100])
-    if not session_date:
-        extract = client.chat.completions.create(
-            model="gpt-5.4",
-            messages=[
-                {"role": "system", "content": f"Today is {_date.today().isoformat()}. Extract the session date from this coaching transcript. The date may appear in any format. Convert it to YYYY-MM-DD. Return ONLY a JSON object with key: date. If no date is found, return {{\"date\": \"\"}}."},
-                {"role": "user", "content": transcript[:1000]},
-            ],
-            response_format={"type": "json_object"},
-        )
-        extracted = json.loads(extract.choices[0].message.content)
-        session_date = extracted.get("date", "")
-        _logging.getLogger(__name__).info("Date extraction — GPT fallback result: %r", session_date)
-    if not session_date:
-        session_date = _date.today().isoformat()
-        _logging.getLogger(__name__).info("Date extraction — no date found, using today: %r", session_date)
+    if confirmed_date:
+        session_date = confirmed_date
+    else:
+        session_date = _parse_date_from_text(transcript)
+        _logging.getLogger(__name__).info("Date extraction — regex result: %r", session_date)
+        if not session_date:
+            extract = client.chat.completions.create(
+                model="gpt-5.4",
+                messages=[
+                    {"role": "system", "content": f"Today is {_date.today().isoformat()}. Extract the session date from this coaching transcript. The date may appear in any format. Convert it to YYYY-MM-DD. Return ONLY a JSON object with key: date. If no date is found, return {{\"date\": \"\"}}."},
+                    {"role": "user", "content": transcript[:1000]},
+                ],
+                response_format={"type": "json_object"},
+            )
+            extracted = json.loads(extract.choices[0].message.content)
+            session_date = extracted.get("date", "")
+        if not session_date:
+            session_date = _date.today().isoformat()
     if not client_name:
         client_name = "Unknown"
     if client_name_2:

@@ -396,7 +396,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 os.remove(file_path)
 
 
-AI_CONVERSATION, ASK_TRANSCRIPT, ASK_PROOF_PHOTO = range(3)
+AI_CONVERSATION, ASK_TRANSCRIPT, ASK_PROOF_PHOTO, ASK_SESSION_DATE = range(4)
 PAYMENT_RECEIPT, PAYMENT_REMARK, PAYMENT_CONFIRM, PAYMENT_EDIT, PAYMENT_EDIT_VALUE = 200, 201, 202, 203, 204
 
 # Module-level references to ConversationHandlers, populated in main().
@@ -661,7 +661,24 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
                 client_record_2 = search_cache.get(member_id_2, {}) if member_id_2 else {}
 
                 label = f"{client_name} & {client_name_2}" if client_name_2 else client_name
-                # Store confirmed client data and ask for proof photo before processing
+
+                # Extract date — regex first, GPT fallback
+                extracted_date = coaching._parse_date_from_text(transcript)
+                if not extracted_date:
+                    from openai import OpenAI as _OAI
+                    from datetime import date as _dt
+                    _oc = _OAI(api_key=os.environ["OPENAI_API_KEY"])
+                    _r = _oc.chat.completions.create(
+                        model="gpt-5.4",
+                        messages=[
+                            {"role": "system", "content": f"Today is {_dt.today().isoformat()}. Extract the session date from this coaching transcript. Convert it to YYYY-MM-DD. Return ONLY a JSON object with key: date. If no date is found, return {{\"date\": \"\"}}."},
+                            {"role": "user", "content": transcript[:1000]},
+                        ],
+                        response_format={"type": "json_object"},
+                    )
+                    import json as _json2
+                    extracted_date = _json2.loads(_r.choices[0].message.content).get("date", "")
+
                 context.user_data["pending_coaching"] = {
                     "client_name": client_name,
                     "client_name_2": client_name_2,
@@ -670,14 +687,17 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
                     "client_record_2": client_record_2,
                     "transcript": transcript,
                     "label": label,
+                    "confirmed_date": extracted_date,
                 }
+                date_display = f"<b>{extracted_date}</b>" if extracted_date else "<i>No date detected — please provide the date</i>"
                 await msg_obj.reply_text(
-                    f"Got it — confirmed *{label}* ({business_name}).\n\n"
-                    "Please send a photo as proof of session to proceed.",
-                    parse_mode=ParseMode.MARKDOWN,
+                    f"Got it — confirmed <b>{label}</b> ({business_name}).\n\n"
+                    f"📅 Session date detected: {date_display}\n\n"
+                    "Is this correct? Reply <b>yes</b> to confirm, or send the correct date in YYYY-MM-DD format (e.g. 2026-07-01).",
+                    parse_mode=ParseMode.HTML,
                 )
                 confirmed = True
-                tool_result = "Client confirmed. Waiting for proof photo."
+                tool_result = "Client confirmed. Waiting for date confirmation."
 
             else:
                 tool_result = "Unknown tool."
@@ -685,7 +705,7 @@ async def _run_identification_agent(update: Update, context: ContextTypes.DEFAUL
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
 
         if confirmed:
-            return ASK_PROOF_PHOTO
+            return ASK_SESSION_DATE
         # Loop back to let the AI respond after tool results
 
     # Exhausted iterations without confirming
@@ -716,6 +736,7 @@ async def _run_coaching_with_photo(update, context, proof_photo_url: str = None)
             pending.get("client_name_2"),
             pending.get("client_record_2"),
             proof_photo_url,
+            pending.get("confirmed_date"),
         )
         formatted = md_to_html(markdown)
         for chunk in _split_html(formatted):
@@ -726,6 +747,50 @@ async def _run_coaching_with_photo(update, context, proof_photo_url: str = None)
         await msg_obj.reply_text("Failed to process transcript. Please try again.")
     context.user_data.clear()
     return ConversationHandler.END
+
+
+async def coaching_confirm_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User is confirming or correcting the session date before the proof photo step."""
+    from datetime import datetime
+    text = update.message.text.strip()
+    pending = context.user_data.get("pending_coaching", {})
+
+    if text.lower() in ("yes", "ya", "yep", "correct", "ok", "betul", "confirm", "y", "ye"):
+        date = pending.get("confirmed_date") or datetime.today().strftime("%Y-%m-%d")
+        pending["confirmed_date"] = date
+        await update.message.reply_text(
+            f"✅ Date confirmed: *{date}*\n\nPlease send a photo as proof of session to proceed.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ASK_PROOF_PHOTO
+
+    # Try YYYY-MM-DD directly
+    try:
+        datetime.strptime(text, "%Y-%m-%d")
+        pending["confirmed_date"] = text
+        await update.message.reply_text(
+            f"✅ Date set to *{text}*\n\nPlease send a photo as proof of session to proceed.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ASK_PROOF_PHOTO
+    except ValueError:
+        pass
+
+    # Try natural language date via coaching parser
+    parsed = coaching._parse_date_from_text(text)
+    if parsed:
+        pending["confirmed_date"] = parsed
+        await update.message.reply_text(
+            f"✅ Date set to *{parsed}*\n\nPlease send a photo as proof of session to proceed.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ASK_PROOF_PHOTO
+
+    await update.message.reply_text(
+        "Please reply *yes* to confirm the date shown, or send the correct date in YYYY-MM-DD format (e.g. 2026-07-01).",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return ASK_SESSION_DATE
 
 
 async def coaching_proof_photo_nudge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1258,6 +1323,9 @@ def main() -> None:
             ],
             AI_CONVERSATION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ai_conversation)
+            ],
+            ASK_SESSION_DATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, coaching_confirm_date),
             ],
             ASK_PROOF_PHOTO: [
                 MessageHandler(filters.PHOTO | filters.Document.IMAGE, coaching_proof_photo),
