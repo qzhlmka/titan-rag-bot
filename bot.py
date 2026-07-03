@@ -1261,7 +1261,7 @@ def main() -> None:
             ],
             ASK_PROOF_PHOTO: [
                 MessageHandler(filters.PHOTO | filters.Document.IMAGE, coaching_proof_photo),
-                MessageHandler(filters.ALL, coaching_proof_photo_nudge),
+                MessageHandler(filters.ALL & ~filters.COMMAND, coaching_proof_photo_nudge),
             ],
         },
         fallbacks=[],
