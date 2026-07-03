@@ -728,6 +728,14 @@ async def _run_coaching_with_photo(update, context, proof_photo_url: str = None)
     return ConversationHandler.END
 
 
+async def coaching_proof_photo_nudge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Catch-all for the proof photo step — block AI and re-prompt until a photo is received."""
+    await update.effective_message.reply_text(
+        "Please send a photo as proof of session to proceed. No other input will be accepted at this step."
+    )
+    return ASK_PROOF_PHOTO
+
+
 async def coaching_proof_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """User sent a proof-of-session photo — upload to Supabase and pass the public URL to Make."""
     msg = update.message
@@ -1253,6 +1261,7 @@ def main() -> None:
             ],
             ASK_PROOF_PHOTO: [
                 MessageHandler(filters.PHOTO | filters.Document.IMAGE, coaching_proof_photo),
+                MessageHandler(filters.ALL, coaching_proof_photo_nudge),
             ],
         },
         fallbacks=[],
