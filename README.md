@@ -44,13 +44,14 @@ A Telegram CRM assistant for RichWorks Consulting Group (Titan program). Handles
 3. Formatted summary sent back to Telegram
 
 ### `/payment`
-1. User uploads a receipt photo or image document
+1. User uploads a receipt photo, image, or PDF document
 2. GPT-4o extracts: client name, company, amount, installment month, transaction reference, recipient bank account
 3. Bank account matched against `bank_accounts.json`
-4. Client looked up in CRM (name match → company match → semantic search fallback)
-5. Bot shows a summary with **Confirm / Edit** inline buttons; any field can be corrected
-6. On confirm, payload sent to **Make payment webhook** and receipt uploaded to Supabase Storage
-7. Notification posted to a configured Telegram group/topic
+4. Client looked up in both active (`client_details`) and ex-client (`ex_client_details`) CRM tables — partial name match → company match → semantic search fallback
+5. If multiple candidates are found across active and ex-client tables, bot shows a **disambiguation keyboard** (🟢 Current member / 🔴 Former member) and waits for selection
+6. Bot shows a summary with **Confirm / Edit** inline buttons; any field can be corrected (editing client name re-triggers the CRM lookup and disambiguation if needed)
+7. On confirm, payload sent to **Make payment webhook** and receipt uploaded to Supabase Storage
+8. Notification posted to a configured Telegram group/topic
 
 ## Tech Stack
 
@@ -152,8 +153,10 @@ The AI agent automatically picks the right tool based on the query:
 
 | Table | Description |
 |-------|-------------|
-| `client_details` | Client records (name, email, phone, CAM, membership dates, tier) |
-| `company_details` | Company records (name, industry, location, brand) |
+| `client_details` | Active client records (name, email, phone, CAM, membership dates, tier) |
+| `company_details` | Active company records (name, industry, location, brand) |
+| `ex_client_details` | Former client records (same structure as `client_details`) |
+| `ex_company_details` | Former company records (same structure as `company_details`) |
 | `company_sales` | Monthly sales per company (actual, target, min_target, ytd) |
 | `embeddings` | pgvector embeddings for semantic search |
 | `allowed_chats` | Whitelisted Telegram chat IDs |
