@@ -432,7 +432,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 AI_CONVERSATION, ASK_TRANSCRIPT, ASK_PROOF_PHOTO, ASK_SESSION_DATE = range(4)
-PAYMENT_RECEIPT, PAYMENT_REMARK, PAYMENT_CONFIRM, PAYMENT_EDIT, PAYMENT_EDIT_VALUE = 200, 201, 202, 203, 204
+PAYMENT_RECEIPT, PAYMENT_REMARK, PAYMENT_CONFIRM, PAYMENT_EDIT, PAYMENT_EDIT_VALUE, PAYMENT_CLIENT_SELECT = 200, 201, 202, 203, 204, 205
 
 # Module-level references to ConversationHandlers, populated in main().
 # Used so entry points can kill sibling conversations before starting a new one.
@@ -949,14 +949,65 @@ async def payment_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await msg.reply_text("Failed to read the receipt. Please try again.")
         return PAYMENT_RECEIPT
 
-    return await _show_payment_summary(update, context, extracted, file_url)
+    client_name = extracted.get("clientName", "")
+    company_name = extracted.get("companyName", "")
+    candidates = await asyncio.to_thread(payment.lookup_client_all, client_name, company_name)
+
+    if len(candidates) >= 2:
+        context.user_data["payment_pending"] = {"mode": "initial", "extracted": extracted, "file_url": file_url}
+        context.user_data["payment_candidates"] = candidates
+        await update.message.reply_text(
+            _disambiguation_text(candidates),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_disambiguation_keyboard(candidates),
+        )
+        return PAYMENT_CLIENT_SELECT
+
+    crm = candidates[0] if candidates else {}
+    return await _show_payment_summary(update, context, extracted, file_url, crm)
 
 
-async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, extracted: dict, file_url: str) -> int:
+async def payment_client_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles client disambiguation button press (from initial receipt flow or edit flow)."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "pay_cancel_client":
+        context.user_data.pop("payment_pending", None)
+        context.user_data.pop("payment_candidates", None)
+        await query.edit_message_text("Payment cancelled.")
+        return ConversationHandler.END
+
+    idx = int(query.data.split("_")[-1])
+    candidates = context.user_data.pop("payment_candidates", [])
+    pending = context.user_data.pop("payment_pending", {})
+    crm = candidates[idx] if idx < len(candidates) else {}
+
+    if pending.get("mode") == "edit":
+        # Update the existing payment record with the selected client
+        p = context.user_data.get("payment", {})
+        p["memberId"] = crm.get("member_id", "")
+        p["clientName"] = crm.get("name", "") or p.get("clientName", "")
+        crm_company = (crm.get("company_details") or {}).get("company_name", "")
+        if crm_company:
+            p["companyName"] = crm_company
+        if crm.get("cam"):
+            p["cam"] = crm.get("cam", "")
+        await query.edit_message_text(
+            _payment_summary_text(p),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_confirm_keyboard(),
+        )
+        return PAYMENT_CONFIRM
+
+    await query.edit_message_text("Got it, looking up details...")
+    return await _show_payment_summary(update, context, pending.get("extracted", {}), pending.get("file_url", ""), crm)
+
+
+async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, extracted: dict, file_url: str, crm: dict) -> int:
     client_name = extracted.get("clientName", "")
     company_name = extracted.get("companyName", "")
 
-    crm = await asyncio.to_thread(payment.lookup_client, client_name, company_name)
     crm_name = crm.get("name", "") if crm else ""
     crm_company = (crm.get("company_details") or {}).get("company_name", "") if crm else ""
     crm_cam = crm.get("cam", "") if crm else ""
@@ -986,7 +1037,7 @@ async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TY
         "accountName": account_info.get("accountName", ""),
     }
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         _payment_summary_text(context.user_data["payment"]),
         parse_mode=ParseMode.HTML,
         reply_markup=_confirm_keyboard(),
@@ -1028,6 +1079,26 @@ def _payment_summary_text(p: dict) -> str:
         f"🏷 Account: {p.get('accountName') or '—'}\n\n"
         f"⚠️ <i>Please make sure all details are correct before submitting.</i>"
     )
+
+
+def _disambiguation_text(candidates: list) -> str:
+    lines = ["<b>Multiple clients found with this name. Which one?</b>\n"]
+    for c in candidates:
+        tag = "🟢 Current member" if c.get("_source") == "active" else "🔴 Former member"
+        company = (c.get("company_details") or {}).get("company_name", "—")
+        member_id = c.get("member_id", "—")
+        lines.append(f"{tag}: <b>{c.get('name', '—')}</b> — {company} (ID: {member_id})")
+    return "\n".join(lines)
+
+
+def _disambiguation_keyboard(candidates: list) -> InlineKeyboardMarkup:
+    buttons = []
+    for i, c in enumerate(candidates):
+        tag = "🟢 Current" if c.get("_source") == "active" else "🔴 Former"
+        member_id = c.get("member_id", "—")
+        buttons.append([InlineKeyboardButton(f"{tag}: {c.get('name', '')} ({member_id})", callback_data=f"pay_client_{i}")])
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="pay_cancel_client")])
+    return InlineKeyboardMarkup(buttons)
 
 
 def _confirm_keyboard() -> InlineKeyboardMarkup:
@@ -1189,10 +1260,20 @@ async def payment_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
     key, _ = _PAYMENT_FIELDS[idx]
     p[key] = update.message.text.strip()
 
-    # Re-run CRM lookup when client name or company name is edited, always overwrite CRM-sourced fields
+    # Re-run CRM lookup when client name or company name is edited
     if key in ("clientName", "companyName"):
         await update.message.chat.send_action(ChatAction.TYPING)
-        crm = await asyncio.to_thread(payment.lookup_client, p.get("clientName", ""), p.get("companyName", ""))
+        candidates = await asyncio.to_thread(payment.lookup_client_all, p.get("clientName", ""), p.get("companyName", ""))
+        if len(candidates) >= 2:
+            context.user_data["payment_pending"] = {"mode": "edit"}
+            context.user_data["payment_candidates"] = candidates
+            await update.message.reply_text(
+                _disambiguation_text(candidates),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_disambiguation_keyboard(candidates),
+            )
+            return PAYMENT_CLIENT_SELECT
+        crm = candidates[0] if candidates else {}
         if crm:
             crm_company = (crm.get("company_details") or {}).get("company_name", "")
             p["memberId"] = crm.get("member_id", "")
@@ -1398,6 +1479,7 @@ def main() -> None:
         ],
         states={
             PAYMENT_RECEIPT: [MessageHandler(filters.PHOTO | filters.Document.ALL, payment_receipt)],
+            PAYMENT_CLIENT_SELECT: [CallbackQueryHandler(payment_client_select, pattern="^pay_(client_\\d+|cancel_client)$")],
             PAYMENT_CONFIRM: [CallbackQueryHandler(payment_confirm, pattern="^pay_(confirm|edit|cancel)$")],
             PAYMENT_EDIT: [CallbackQueryHandler(payment_edit, pattern="^pay_(field_\\d+|back)$")],
             PAYMENT_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_edit_value)],

@@ -64,6 +64,51 @@ def search_clients(
     return q.execute().data or []
 
 
+def search_ex_clients(
+    name: str = None,
+    company_name: str = None,
+    limit: int = 50,
+) -> list[dict]:
+    company_ids = None
+    if company_name:
+        res = (
+            get_client()
+            .from_("ex_company_details")
+            .select("company_id")
+            .ilike("company_name", f"%{company_name}%")
+            .execute()
+        )
+        company_ids = [r["company_id"] for r in (res.data or [])]
+        if not company_ids:
+            return []
+
+    q = get_client().from_("ex_client_details").select("*").limit(limit)
+    if name:
+        q = q.ilike("name", f"%{name}%")
+    if company_ids:
+        q = q.in_("company_id", company_ids)
+
+    rows = q.execute().data or []
+
+    # No FK from ex_client_details → ex_company_details, so attach manually
+    company_cache = {}
+    for row in rows:
+        cid = row.get("company_id")
+        if cid and cid not in company_cache:
+            res = (
+                get_client()
+                .from_("ex_company_details")
+                .select("company_name, brand, industry, location")
+                .eq("company_id", cid)
+                .limit(1)
+                .execute()
+            )
+            company_cache[cid] = (res.data or [{}])[0]
+        row["company_details"] = company_cache.get(cid, {}) if cid else {}
+
+    return rows
+
+
 def get_company_details(company_name: str) -> list[dict]:
     result = (
         get_client()

@@ -118,6 +118,36 @@ def _fetch_client_by_member_id(member_id: str) -> dict:
     return rows[0] if rows else {}
 
 
+def _fetch_ex_client_by_member_id(member_id: str) -> dict:
+    """Fetch a record from ex_client_details by exact member_id, with company details attached."""
+    rows = (
+        db.get_client()
+        .from_("ex_client_details")
+        .select("*")
+        .eq("member_id", member_id)
+        .limit(1)
+        .execute()
+        .data or []
+    )
+    if not rows:
+        return {}
+    row = rows[0]
+    cid = row.get("company_id")
+    if cid:
+        res = (
+            db.get_client()
+            .from_("ex_company_details")
+            .select("company_name, brand, industry, location")
+            .eq("company_id", cid)
+            .limit(1)
+            .execute()
+        )
+        row["company_details"] = (res.data or [{}])[0]
+    else:
+        row["company_details"] = {}
+    return row
+
+
 def _fetch_clients_by_company_id(company_id: str) -> list[dict]:
     """Fetch client records for a given company_id (with company_details join)."""
     return (
@@ -172,6 +202,13 @@ def lookup_client(client_name: str, company_name: str) -> dict:
                 logger.warning("Semantic search fallback failed: %s", e)
 
     if not results:
+        # Fall back to ex-client tables
+        if client_name:
+            results = db.search_ex_clients(name=client_name, limit=5)
+        if not results and company_name:
+            results = db.search_ex_clients(company_name=company_name, limit=5)
+
+    if not results:
         return {}
 
     if client_name:
@@ -180,6 +217,87 @@ def lookup_client(client_name: str, company_name: str) -> dict:
             if client_name.lower() in name or name in client_name.lower():
                 return r
     return results[0]
+
+
+def _close_matches(results: list[dict], client_name: str) -> list[dict]:
+    """Return candidates from results that match client_name.
+    Returns ALL records with the exact same name (genuine duplicates → caller disambiguates).
+    For partial matches, returns only the single best to avoid flooding with common substrings."""
+    if not results:
+        return []
+    if not client_name:
+        return results[:1]
+    cl = client_name.lower().strip()
+    exact = [r for r in results if r.get("name", "").lower().strip() == cl]
+    if exact:
+        return exact
+    partial = [r for r in results if cl in r.get("name", "").lower() or r.get("name", "").lower() in cl]
+    return partial[:1] if partial else results[:1]
+
+
+def lookup_client_all(client_name: str, company_name: str) -> list[dict]:
+    """Search both active and ex-client tables. Returns all close-match candidates,
+    each tagged with '_source': 'active' or 'ex'. Returns [] if nothing found.
+    Caller should disambiguate when len > 1."""
+    # Active tables
+    active_results = []
+    if client_name:
+        active_results = db.search_clients(name=client_name, limit=5)
+    if not active_results and company_name:
+        active_results = db.search_clients(company_name=company_name, limit=5)
+
+    # Semantic fallback (embeddings may include both active and ex-clients)
+    sem_ex_results = []
+    if not active_results:
+        query = " ".join(filter(None, [client_name, company_name]))
+        if query.strip():
+            try:
+                embedding = _embed(query)
+                sem_hits = db.semantic_search(embedding, limit=8)
+                for hit in sem_hits:
+                    meta = hit.get("metadata") or {}
+                    if meta.get("type") == "client" and meta.get("member_id"):
+                        rec = _fetch_client_by_member_id(meta["member_id"])
+                        if rec:
+                            active_results.append(rec)
+                        else:
+                            # Not in active table — check if it's an ex-client
+                            ex_rec = _fetch_ex_client_by_member_id(meta["member_id"])
+                            if ex_rec:
+                                sem_ex_results.append(ex_rec)
+                if not active_results:
+                    for hit in sem_hits:
+                        meta = hit.get("metadata") or {}
+                        if meta.get("type") == "company" and meta.get("company_id"):
+                            recs = _fetch_clients_by_company_id(meta["company_id"])
+                            if recs:
+                                active_results.extend(recs)
+                                break
+            except Exception as e:
+                logger.warning("Semantic search fallback failed: %s", e)
+
+    # Ex-client tables (text search)
+    ex_results = []
+    if client_name:
+        ex_results = db.search_ex_clients(name=client_name, limit=5)
+    if not ex_results and company_name:
+        ex_results = db.search_ex_clients(company_name=company_name, limit=5)
+
+    # Merge semantic ex-hits into ex_results (dedup by member_id)
+    seen_ex_ids = {r.get("member_id") for r in ex_results}
+    for r in sem_ex_results:
+        if r.get("member_id") not in seen_ex_ids:
+            ex_results.append(r)
+            seen_ex_ids.add(r.get("member_id"))
+
+    candidates = []
+    for r in _close_matches(active_results, client_name):
+        r["_source"] = "active"
+        candidates.append(r)
+    for r in _close_matches(ex_results, client_name):
+        r["_source"] = "ex"
+        candidates.append(r)
+    return candidates
 
 
 def send_to_make(payload: dict) -> None:
