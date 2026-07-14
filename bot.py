@@ -283,6 +283,32 @@ async def dailyreport_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return await _run_dailyreport(update, text)
 
 
+async def _send_markdown_summary(msg_obj, text, success_msg: str, error_msg: str) -> None:
+    """Best-effort send of a markdown summary as HTML with plain-text fallback. Never raises."""
+    if not text:
+        try:
+            await msg_obj.reply_text(error_msg)
+        except Exception:
+            pass
+        return
+    sent_ok = False
+    try:
+        formatted = md_to_html(text)
+        for chunk in _split_html(formatted):
+            await msg_obj.reply_text(chunk, parse_mode=ParseMode.HTML)
+        sent_ok = True
+    except Exception as e:
+        logger.error("Failed to send summary to Telegram: %s", e, exc_info=True)
+        try:
+            await msg_obj.reply_text(text[:4000])
+        except Exception:
+            pass
+    try:
+        await msg_obj.reply_text(success_msg if sent_ok else error_msg)
+    except Exception:
+        pass
+
+
 async def _run_dailyreport(update: Update, target_date: str) -> int:
     await update.message.reply_text(f"Generating daily coaching report for {target_date or 'today'}, please wait...")
     await update.message.chat.send_action(ChatAction.TYPING)
@@ -298,22 +324,19 @@ async def _run_dailyreport(update: Update, target_date: str) -> int:
         return ConversationHandler.END
 
     if count == 0:
-        await update.message.reply_text(content)
+        try:
+            await update.message.reply_text(content)
+        except Exception:
+            pass
         return ConversationHandler.END
 
     # Make has already been notified at this point. Send the preview (best-effort).
-    try:
-        formatted = md_to_html(content)
-        for chunk in _split_html(formatted):
-            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
-        await update.message.reply_text("Daily report has been sent to Make successfully.")
-    except Exception as e:
-        logger.error("Failed to send daily report summary to Telegram: %s", e, exc_info=True)
-        try:
-            await update.message.reply_text(content[:4000])
-        except Exception:
-            pass
-        await update.message.reply_text("Report was sent to Make successfully, but could not display the preview here.")
+    await _send_markdown_summary(
+        update.message,
+        content,
+        "Daily report has been sent to Make successfully.",
+        "Report was sent to Make successfully, but could not display the preview here.",
+    )
     return ConversationHandler.END
 
 
@@ -757,18 +780,12 @@ async def _run_coaching_with_photo(update, context, proof_photo_url: str = None)
         return ConversationHandler.END
 
     # Make has already been notified at this point. Send the preview (best-effort).
-    try:
-        formatted = md_to_html(markdown)
-        for chunk in _split_html(formatted):
-            await msg_obj.reply_text(chunk, parse_mode=ParseMode.HTML)
-        await msg_obj.reply_text("Summary has been sent to Make successfully.")
-    except Exception as e:
-        logger.error("Failed to send coaching summary to Telegram: %s", e, exc_info=True)
-        try:
-            await msg_obj.reply_text(markdown[:4000])
-        except Exception:
-            pass
-        await msg_obj.reply_text("Summary was sent to Make successfully, but could not display the preview here.")
+    await _send_markdown_summary(
+        msg_obj,
+        markdown,
+        "Summary has been sent to Make successfully.",
+        "Summary was sent to Make successfully, but could not display the preview here.",
+    )
     context.user_data.clear()
     return ConversationHandler.END
 
