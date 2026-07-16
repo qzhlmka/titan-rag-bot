@@ -201,6 +201,32 @@ def get_top_companies_by_sales(
     return result.data or []
 
 
+def save_payment(payload: dict) -> None:
+    """Persist a confirmed payment to the payments table."""
+    raw_amount = payload.get("installmentAmount", "")
+    try:
+        import re as _re
+        amount = float(_re.sub(r"[^\d.]", "", str(raw_amount))) if raw_amount else None
+    except ValueError:
+        amount = None
+
+    get_client().from_("payments").insert({
+        "member_id": payload.get("memberId") or None,
+        "name": payload.get("clientName") or None,
+        "company_name": payload.get("companyName") or None,
+        "amount": amount,
+        "attachment_link": payload.get("attachmentLink") or None,
+        "payment_month": payload.get("installmentMonth") or None,
+        "cam": payload.get("cam") or None,
+        "reference": payload.get("reference") or None,
+        "account_number": payload.get("recipientAccount") or None,
+        "bank_name": payload.get("bankName") or None,
+        "account_name": payload.get("accountName") or None,
+        "remark": payload.get("remark") or None,
+        "source": "bot",
+    }).execute()
+
+
 def save_coaching_session(payload: dict, session_date: str, client_name: str, business_name: str, member_id: str, cam: str) -> None:
     get_client().from_("coaching_sessions").insert({
         "session_date": session_date,

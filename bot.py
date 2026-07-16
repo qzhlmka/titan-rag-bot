@@ -1199,6 +1199,7 @@ async def payment_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     payload["telegramThreadId"] = str(query.message.message_thread_id or "")
     try:
         await asyncio.to_thread(payment.send_to_make, payload)
+        await asyncio.to_thread(db.save_payment, payload)
         lines = [
             "✅ <b>Payment submitted successfully!</b>",
             "",
