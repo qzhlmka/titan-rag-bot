@@ -270,6 +270,7 @@ Pecahan Bulanan:
     payload["sales2025"] = data["sales2025"]
     payload["sales2026"] = data["sales2026"]
     payload["target2026"] = data["target2026"]
+    payload["cam"] = data["cam"]
     payload["telegramChatId"] = str(chat_id)
     if thread_id:
         payload["telegramThreadId"] = str(thread_id)
