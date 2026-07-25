@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Setup
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env   # fill in keys, see "Key environment variables" below
+```
+
 ## Running the Bot
 
 ```bash
@@ -15,7 +22,7 @@ nohup python bot.py >> bot.log 2>&1 &
 tail -f bot.log
 ```
 
-There are no tests, no linter config, and no build step. The entire runtime is a single `python bot.py` process.
+There are no tests, no linter config, and no build step. The entire runtime is a single `python bot.py` process. `Procfile` (`worker: python bot.py`) + `runtime.txt` (Python 3.11.9) target a Heroku-style worker dyno for deployment.
 
 ## Architecture
 
