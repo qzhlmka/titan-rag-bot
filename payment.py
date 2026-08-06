@@ -33,6 +33,7 @@ Extract the following and return a JSON object with exactly these fields:
 - installmentMonth: month and year the payment covers, e.g. "June 2026". Infer from the receipt date if not stated.
 - reference: the transaction/reference ID number from the receipt (e.g. "TXN123456", "REF: 98765"). Return "" if not found.
 - recipientAccount: the RECIPIENT's bank account number (the account that received the money — belonging to RichWorks/Titan). Look for "To", "Penerima", "Recipient", or the destination account. Return digits only, no spaces or dashes. Return "" if not found.
+- paymentDateTime: the exact date and time the transaction was made, as shown on the receipt. Use ISO 8601 format (YYYY-MM-DD HH:MM:SS) if you can determine it precisely, otherwise return the date/time exactly as printed on the receipt. Return "" if not found.
 
 Return ONLY the JSON object. If a field is not visible, return ""."""
 

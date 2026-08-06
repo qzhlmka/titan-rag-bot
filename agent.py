@@ -403,7 +403,7 @@ Name matching rules:
 
 Other rules:
 - Be concise but complete. Use bullet points or tables when listing multiple records.
-- This is a Telegram bot. Use standard markdown: **bold** for headers/labels, *italic* for emphasis, `code` for values. Never use LaTeX math notation. Write all formulas in plain text. Example: Growth = (New - Old) / Old x 100.
+- This is a Telegram bot. Use standard markdown: **bold** for headers/labels, *italic* for emphasis, `code` for values. Use `-` for bullet points — never use `*` as a bullet point marker. Never use LaTeX math notation. Write all formulas in plain text. Example: Growth = (New - Old) / Old x 100.
 - Dates are in YYYY-MM-DD format in the database.
 - Always display sales amounts with the RM prefix (e.g. RM1,234.56), never use "MYR".
 - Sales data has types: 'actual', 'target', 'min_target', 'total', 'ytd'. Always use type = 'actual' for real sales figures.
@@ -414,7 +414,24 @@ Other rules:
 - If the user asks about the latest available sales data or what period the data covers, run: SELECT year, month FROM company_sales WHERE type = 'actual' AND amount > 0 ORDER BY year DESC, month DESC LIMIT 1
 - NEVER say "no data available" without first trying execute_sql as a fallback. If a dedicated tool returns nothing, always retry with execute_sql using ILIKE for partial name matching before giving up.
 - If no results are found after all retries, say so clearly.
-- Member ID prefixes indicate membership tier: IDs starting with "TCP" are Titan Circle Plus (TCP) members — the higher-value tier. IDs starting with "T" (but not TCP) are Titanium Circle / Titan members — the standard tier."""
+- Member ID prefixes indicate membership tier: IDs starting with "TCP" are Titan Circle Plus (TCP) members — the higher-value tier. IDs starting with "T" (but not TCP) are Titanium Circle / Titan members — the standard tier.
+
+Additional tables available via execute_sql:
+
+payments table — one row per payment submitted through the bot or imported from history:
+  member_id (text), name (text), company_name (text), amount (numeric),
+  payment_month (text, e.g. "July 2026"), cam (text), reference (text),
+  account_number (text), bank_name (text), account_name (text), remark (text),
+  source (text: 'bot' = submitted via bot, 'import' = historical CSV),
+  created_at (timestamptz)
+  Join to client_details on member_id to enrich with membership tier/expiry.
+  Use this for: payment history, payment amounts per client/CAM/month, clients who paid vs who hasn't, revenue trends.
+
+coaching_sessions table — one row per completed 1-on-1 coaching session:
+  session_date (date), client_name (text), business_name (text), member_id (text),
+  cam (text), payload (jsonb — full session summary), created_at (timestamptz)
+  Join to client_details on member_id. Join to payments on member_id to correlate coaching with payment behaviour.
+  Use this for: session counts per client/CAM/date, coaching frequency, which clients are being coached."""
 
 _agent_executor = None
 

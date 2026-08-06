@@ -33,6 +33,8 @@ This is a **Python Telegram Bot (PTB v21)** CRM assistant. The entry point is `b
 | `database.py` | All Supabase query functions — single Supabase client per thread via `threading.local` |
 | `slides.py` | PowerPoint generation via external Google Apps Script URLs |
 | `sync_embeddings.py` | Re-embeds all CRM records into the `embeddings` pgvector table |
+| `import_payments.py` | One-time CSV importer for historical payments (`python import_payments.py payments.csv`) |
+| `bank_accounts.json` | Maps bank account numbers to bank name/account name for payment flow |
 
 ### Conversation state machines
 
@@ -80,6 +82,38 @@ All Supabase and OpenAI calls block — wrap them with `asyncio.to_thread(fn, *a
 | `DAILY_REPORT_WEBHOOK_URL` | Make webhook for daily reports |
 | `PAYMENT_WEBHOOK_URL` | Make webhook for payment receipts |
 | `PAYMENT_NOTIFY_CHAT_ID` | Telegram group to notify on payment confirm |
+| `PAYMENT_NOTIFY_THREAD_ID` | Topic thread ID for payment notifications (optional) |
+| `N8N_WEBHOOK_URL` | n8n webhook for `/updatedatabase` command |
+| `CRM_WEBHOOK_URL` | CRM webhook used by `update_client_sales` agent tool |
+| `TOP100_SLIDES_URL` | Google Apps Script URL for Top 100 sales slide |
+| `COMPANY_SALES_SLIDE_URL` | Google Apps Script URL for company sales slide |
+| `COMPANY_SALES_CHART_SLIDE_URL` | Google Apps Script URL for company sales+chart slide |
+| `COMPANY_CHART_SLIDE_URL` | Google Apps Script URL for company chart-only slide |
+| `TOP100_CHART_SLIDE_URL` | Google Apps Script URL for Top 100 chart slide |
+| `KMP_DUPLICATE_LIB_OK` | Set to `TRUE` to suppress OpenMP conflict from LangChain |
+
+## Agent model
+
+The LangChain `AgentExecutor` in `agent.py` uses `gpt-5.4-mini` (not GPT-4o). GPT-4o is used only for coaching transcript summaries (`coaching.py`) and receipt extraction (`payment.py`). The agent is a module-level singleton — it is lazily initialized on first `/ask` and then reused for the process lifetime.
+
+Agent tools beyond standard CRM queries:
+- `update_client_sales` — writes sales via `CRM_WEBHOOK_URL`; **2026-only** guard is in the tool itself
+- `generate_top100_sales_slide`, `generate_company_sales_slide`, `generate_company_sales_chart_slide`, `generate_company_chart_slide`, `generate_top100_chart_slide` — all call the respective Google Apps Script URLs with the current `chat_id`/`thread_id`; these are set on module-level globals (`_current_chat_id`, `_current_thread_id`) by `bot.py` before each agent invocation
+
+## Database tables
+
+Beyond the tables in the execute_sql docstring, the following are used by the bot:
+
+| Table | Purpose |
+|-------|---------|
+| `payments` | One row per payment — from bot or historical CSV import. Fields: `member_id`, `name`, `company_name`, `amount`, `payment_month`, `cam`, `reference`, `account_number`, `bank_name`, `account_name`, `remark`, `source` (`'bot'`/`'import'`), `created_at` |
+| `coaching_sessions` | One row per completed 1-on-1. Fields: `session_date`, `client_name`, `business_name`, `member_id`, `cam`, `payload` (jsonb), `created_at` |
+| `allowed_chats` | Whitelisted Telegram `chat_id` values |
+| `embeddings` | pgvector embeddings for semantic search |
+
+## Deployment
+
+The `Procfile` declares `worker: python bot.py` — deploys as a Heroku worker dyno (not a web process). No port is bound.
 
 ## Refreshing embeddings
 

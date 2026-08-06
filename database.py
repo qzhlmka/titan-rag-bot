@@ -217,6 +217,7 @@ def save_payment(payload: dict) -> None:
         "amount": amount,
         "attachment_link": payload.get("attachmentLink") or None,
         "payment_month": payload.get("installmentMonth") or None,
+        "payment_datetime": payload.get("paymentDateTime") or None,
         "cam": payload.get("cam") or None,
         "reference": payload.get("reference") or None,
         "account_number": payload.get("recipientAccount") or None,
