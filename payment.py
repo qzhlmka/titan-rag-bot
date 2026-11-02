@@ -220,6 +220,25 @@ def lookup_client(client_name: str, company_name: str) -> dict:
     return results[0]
 
 
+def fetch_client_any(member_id: str) -> dict:
+    """Exact member_id lookup across active then ex tables. Returns a tagged record or {}."""
+    member_id = member_id.strip().upper()
+    rec = _fetch_client_by_member_id(member_id)
+    if rec:
+        rec["_source"] = "active"
+        return rec
+    rec = _fetch_ex_client_by_member_id(member_id)
+    if rec:
+        rec["_source"] = "ex"
+    return rec
+
+
+def _name_matches(record: dict, client_name: str) -> bool:
+    cl = (client_name or "").lower().strip()
+    name = (record.get("name") or "").lower().strip()
+    return bool(cl and name and (cl in name or name in cl))
+
+
 def _close_matches(results: list[dict], client_name: str) -> list[dict]:
     """Return candidates from results that match client_name.
     Returns ALL records with the exact same name (genuine duplicates → caller disambiguates).
@@ -298,6 +317,9 @@ def lookup_client_all(client_name: str, company_name: str) -> list[dict]:
     for r in _close_matches(ex_results, client_name):
         r["_source"] = "ex"
         candidates.append(r)
+    # _name_match=False means the record is only a guess (e.g. nearest semantic hit)
+    for r in candidates:
+        r["_name_match"] = _name_matches(r, client_name)
     return candidates
 
 

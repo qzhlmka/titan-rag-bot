@@ -954,11 +954,11 @@ async def payment_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     company_name = extracted.get("companyName", "")
     candidates = await asyncio.to_thread(payment.lookup_client_all, client_name, company_name)
 
-    if len(candidates) >= 2:
+    if _needs_client_pick(candidates):
         context.user_data["payment_pending"] = {"mode": "initial", "extracted": extracted, "file_url": file_url}
         context.user_data["payment_candidates"] = candidates
         await update.message.reply_text(
-            _disambiguation_text(candidates),
+            _disambiguation_text(candidates, client_name),
             parse_mode=ParseMode.HTML,
             reply_markup=_disambiguation_keyboard(candidates),
         )
@@ -979,21 +979,30 @@ async def payment_client_select(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("Payment cancelled.")
         return ConversationHandler.END
 
-    idx = int(query.data.split("_")[-1])
     candidates = context.user_data.pop("payment_candidates", [])
     pending = context.user_data.pop("payment_pending", {})
+
+    if query.data == "pay_manual_client":
+        if pending.get("mode") != "edit":
+            context.user_data["payment"] = _build_payment(pending.get("extracted", {}), pending.get("file_url", ""), {})
+        p = context.user_data.get("payment")
+        if p is None:
+            await query.edit_message_text("Session expired. Please upload the receipt again with /payment.")
+            return ConversationHandler.END
+        p["_editing_field"] = _MEMBER_ID_FIELD
+        await query.edit_message_text(
+            "Type the client's <b>Member ID</b> (e.g. T1517), or their name to search again:",
+            parse_mode=ParseMode.HTML,
+        )
+        return PAYMENT_EDIT_VALUE
+
+    idx = int(query.data.split("_")[-1])
     crm = candidates[idx] if idx < len(candidates) else {}
 
     if pending.get("mode") == "edit":
         # Update the existing payment record with the selected client
         p = context.user_data.get("payment", {})
-        p["memberId"] = crm.get("member_id", "")
-        p["clientName"] = crm.get("name", "") or p.get("clientName", "")
-        crm_company = (crm.get("company_details") or {}).get("company_name", "")
-        if crm_company:
-            p["companyName"] = crm_company
-        if crm.get("cam"):
-            p["cam"] = crm.get("cam", "")
+        _apply_crm(p, crm)
         await query.edit_message_text(
             _payment_summary_text(p),
             parse_mode=ParseMode.HTML,
@@ -1005,7 +1014,7 @@ async def payment_client_select(update: Update, context: ContextTypes.DEFAULT_TY
     return await _show_payment_summary(update, context, pending.get("extracted", {}), pending.get("file_url", ""), crm)
 
 
-async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, extracted: dict, file_url: str, crm: dict) -> int:
+def _build_payment(extracted: dict, file_url: str, crm: dict) -> dict:
     client_name = extracted.get("clientName", "")
     company_name = extracted.get("companyName", "")
 
@@ -1013,21 +1022,17 @@ async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TY
     crm_company = (crm.get("company_details") or {}).get("company_name", "") if crm else ""
     crm_cam = crm.get("cam", "") if crm else ""
     crm_member_id = crm.get("member_id", "") if crm else ""
-    crm_found = "✅ found in CRM" if crm else "⚠️ not found in CRM"
-
-    amount = extracted.get("installmentAmount", "")
-    try:
-        amount_display = f"RM {float(amount):,.2f}" if amount else "—"
-    except (ValueError, TypeError):
-        amount_display = f"RM {amount}"
 
     account_info = payment.lookup_account(extracted.get("recipientAccount", ""))
 
-    context.user_data["payment"] = {
+    # Keys starting with "_" are internal and stripped before submitting
+    return {
         "memberId": crm_member_id,
         "clientName": crm_name or client_name,
         "companyName": crm_company or company_name,
-        "installmentAmount": amount,
+        "_receiptName": client_name,
+        "_receiptCompany": company_name,
+        "installmentAmount": extracted.get("installmentAmount", ""),
         "attachmentLink": file_url,
         "installmentMonth": extracted.get("installmentMonth", ""),
         "paymentDateTime": extracted.get("paymentDateTime", ""),
@@ -1039,6 +1044,19 @@ async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TY
         "accountName": account_info.get("accountName", ""),
     }
 
+
+def _apply_crm(p: dict, crm: dict) -> None:
+    """Replace all client-derived fields on the payment with the chosen CRM record."""
+    p["memberId"] = crm.get("member_id", "")
+    p["clientName"] = crm.get("name", "") or p.get("clientName", "")
+    crm_company = (crm.get("company_details") or {}).get("company_name", "")
+    p["companyName"] = crm_company or p.get("_receiptCompany", "") or p.get("companyName", "")
+    p["cam"] = crm.get("cam", "")
+
+
+async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, extracted: dict, file_url: str, crm: dict) -> int:
+    context.user_data["payment"] = _build_payment(extracted, file_url, crm)
+
     await update.effective_message.reply_text(
         _payment_summary_text(context.user_data["payment"]),
         parse_mode=ParseMode.HTML,
@@ -1048,7 +1066,7 @@ async def _show_payment_summary(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 _PAYMENT_FIELDS = [
-    ("memberId",          "Member ID"),
+    ("memberId",          "Member ID"),  # keep first: _MEMBER_ID_FIELD
     ("clientName",        "Client Name"),
     ("companyName",       "Company Name"),
     ("installmentAmount", "Amount (RM)"),
@@ -1062,16 +1080,30 @@ _PAYMENT_FIELDS = [
 ]
 
 
+_MEMBER_ID_FIELD = 0
+_MEMBER_ID_RE = re.compile(r"^[A-Za-z]{1,4}\d+$")
+
+
+def _needs_client_pick(candidates: list) -> bool:
+    """Ask the user when there are several candidates, or the only one is a guess."""
+    return len(candidates) >= 2 or (len(candidates) == 1 and not candidates[0].get("_name_match"))
+
+
 def _payment_summary_text(p: dict) -> str:
     amount = p.get("installmentAmount", "")
     try:
         amount_display = f"RM {float(amount):,.2f}" if amount else "—"
     except (ValueError, TypeError):
         amount_display = f"RM {amount}"
+    receipt_name = p.get("_receiptName", "")
+    receipt_line = ""
+    if receipt_name and receipt_name.strip().lower() != (p.get("clientName") or "").strip().lower():
+        receipt_line = f"🧾 Name on receipt: {escape(receipt_name)}\n"
     return (
         f"📋 <b>Payment Details</b>\n\n"
         f"🪪 Member ID: {p.get('memberId') or '—'}\n"
         f"👤 Client: {p.get('clientName') or '—'}\n"
+        f"{receipt_line}"
         f"🏢 Company: {p.get('companyName') or '—'}\n"
         f"💰 Amount: {amount_display}\n"
         f"📅 Month: {p.get('installmentMonth') or '—'}\n"
@@ -1085,13 +1117,17 @@ def _payment_summary_text(p: dict) -> str:
     )
 
 
-def _disambiguation_text(candidates: list) -> str:
-    lines = ["<b>Multiple clients found with this name. Which one?</b>\n"]
+def _disambiguation_text(candidates: list, receipt_name: str = "") -> str:
+    if all(c.get("_name_match") for c in candidates):
+        lines = ["<b>Multiple clients found with this name. Which one?</b>\n"]
+    else:
+        lines = [f"<b>No exact CRM match for \"{escape(receipt_name or '—')}\".</b> Closest records:\n"]
     for c in candidates:
         tag = "🟢 Current member" if c.get("_source") == "active" else "🔴 Former member"
         company = (c.get("company_details") or {}).get("company_name", "—")
         member_id = c.get("member_id", "—")
         lines.append(f"{tag}: <b>{c.get('name', '—')}</b> — {company} (ID: {member_id})")
+    lines.append("\nIf none is right, tap <b>None of these</b> and enter the Member ID.")
     return "\n".join(lines)
 
 
@@ -1101,6 +1137,7 @@ def _disambiguation_keyboard(candidates: list) -> InlineKeyboardMarkup:
         tag = "🟢 Current" if c.get("_source") == "active" else "🔴 Former"
         member_id = c.get("member_id", "—")
         buttons.append([InlineKeyboardButton(f"{tag}: {c.get('name', '')} ({member_id})", callback_data=f"pay_client_{i}")])
+    buttons.append([InlineKeyboardButton("🔎 None of these", callback_data="pay_manual_client")])
     buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="pay_cancel_client")])
     return InlineKeyboardMarkup(buttons)
 
@@ -1195,12 +1232,12 @@ async def payment_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer("Client Name is required before submitting.", show_alert=True)
         return PAYMENT_CONFIRM
     if not p.get("memberId", "").strip():
-        await query.answer("Client not found in database. Please verify the client name before submitting.", show_alert=True)
+        await query.answer("Client not found in CRM. Tap Edit → Member ID and enter the client's Member ID (e.g. T1517).", show_alert=True)
         return PAYMENT_CONFIRM
 
     await query.answer()
 
-    payload = context.user_data.pop("payment", {})
+    payload = {k: v for k, v in context.user_data.pop("payment", {}).items() if not k.startswith("_")}
     payload["telegramChatId"] = str(query.message.chat_id)
     payload["telegramThreadId"] = str(query.message.message_thread_id or "")
     try:
@@ -1266,31 +1303,40 @@ async def payment_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if idx is None:
         return PAYMENT_CONFIRM
     key, _ = _PAYMENT_FIELDS[idx]
-    p[key] = update.message.text.strip()
+    value = update.message.text.strip()
 
-    # Re-run CRM lookup when client name or company name is edited
-    if key in ("clientName", "companyName"):
+    if key in ("memberId", "clientName") and _MEMBER_ID_RE.match(value):
+        # Exact Member ID — the reliable way to pin the right client
+        await update.message.chat.send_action(ChatAction.TYPING)
+        crm = await asyncio.to_thread(payment.fetch_client_any, value)
+        if not crm:
+            p["_editing_field"] = idx
+            await update.message.reply_text(
+                f"No client found with Member ID <b>{escape(value)}</b>. Try again, or type the client's name:",
+                parse_mode=ParseMode.HTML,
+            )
+            return PAYMENT_EDIT_VALUE
+        _apply_crm(p, crm)
+    elif key in ("memberId", "clientName", "companyName"):
+        # Re-run CRM lookup; a non-ID typed into Member ID is treated as a name
+        p["clientName" if key == "memberId" else key] = value
         await update.message.chat.send_action(ChatAction.TYPING)
         candidates = await asyncio.to_thread(payment.lookup_client_all, p.get("clientName", ""), p.get("companyName", ""))
-        if len(candidates) >= 2:
+        if _needs_client_pick(candidates):
             context.user_data["payment_pending"] = {"mode": "edit"}
             context.user_data["payment_candidates"] = candidates
             await update.message.reply_text(
-                _disambiguation_text(candidates),
+                _disambiguation_text(candidates, p.get("clientName", "")),
                 parse_mode=ParseMode.HTML,
                 reply_markup=_disambiguation_keyboard(candidates),
             )
             return PAYMENT_CLIENT_SELECT
-        crm = candidates[0] if candidates else {}
-        if crm:
-            crm_company = (crm.get("company_details") or {}).get("company_name", "")
-            p["memberId"] = crm.get("member_id", "")
-            if crm_company:
-                p["companyName"] = crm_company
-            if crm.get("cam"):
-                p["cam"] = crm.get("cam", "")
+        if candidates:
+            _apply_crm(p, candidates[0])
         else:
             p["memberId"] = ""
+    else:
+        p[key] = value
 
     await update.message.reply_text(
         _payment_summary_text(p),
@@ -1487,7 +1533,7 @@ def main() -> None:
         ],
         states={
             PAYMENT_RECEIPT: [MessageHandler(filters.PHOTO | filters.Document.ALL, payment_receipt)],
-            PAYMENT_CLIENT_SELECT: [CallbackQueryHandler(payment_client_select, pattern="^pay_(client_\\d+|cancel_client)$")],
+            PAYMENT_CLIENT_SELECT: [CallbackQueryHandler(payment_client_select, pattern="^pay_(client_\\d+|cancel_client|manual_client)$")],
             PAYMENT_CONFIRM: [CallbackQueryHandler(payment_confirm, pattern="^pay_(confirm|edit|cancel)$")],
             PAYMENT_EDIT: [CallbackQueryHandler(payment_edit, pattern="^pay_(field_\\d+|back)$")],
             PAYMENT_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_edit_value)],
