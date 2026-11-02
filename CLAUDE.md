@@ -113,7 +113,7 @@ Beyond the tables in the execute_sql docstring, the following are used by the bo
 
 ## Deployment
 
-The `Procfile` declares `worker: python bot.py` — deploys as a Heroku worker dyno (not a web process). No port is bound.
+Deployed on **Railway** from the GitHub repo (`main` branch). Railway reads the `Procfile` (`worker: python bot.py`) and `runtime.txt` — it runs as a worker process (not a web service). No port is bound. Pushing to `main` redeploys.
 
 ## Refreshing embeddings
 
